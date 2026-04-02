@@ -21,26 +21,26 @@
 ### Complex Request Example:
 ```json
 {
-  "employee": {
+  "@data": {
     "@source": "personal[status: 'active', age: 25..45]",
     "@fields": {
       "id": "id",
-      "full_name": "CONCAT(last_name_latin, ' ', first_name_latin)",
+      "fish": "CONCAT(last_name, ' ', first_name)",
       "passport": "jshshir"
     },
-    "organization": {
-      "@source": "org",
-      "@join": "INNER JOIN org ON personal.org_id = org.id",
+    "boshqarma": {
+      "@source": "organization",
+      "@join": "INNER JOIN organization ON personal.organization_id = organization.id",
       "@fields": {
-        "name": "name_uz",
-        "code": "code"
+        "nomi": "name",
+        "kod": "code"
       }
     },
-    "position_info": {
-      "@source": "pos[rank_id: in (1, 2, 3)]",
-      "@join": "LEFT JOIN pos ON personal.pos_id = pos.id",
+    "lavozim_info": {
+      "@source": "position[rank_id: in (1, 2, 3)]",
+      "@join": "LEFT JOIN position ON personal.position_id = position.id",
       "@fields": {
-        "title": "name_latin",
+        "lavozim": "name",
         "is_military": "is_military_rank"
       }
     }
@@ -94,48 +94,50 @@ struct ParseResult {
 
 ```json
 {
-  "sql": "SELECT personal.id AS id, CONCAT(personal.last_name_latin, ' ', personal.first_name_latin) AS full_name, personal.jshshir AS passport, org.name_uz AS name, org.code AS code, pos.name_latin AS title, pos.is_military_rank AS is_military FROM personal INNER JOIN org ON personal.org_id = org.id LEFT JOIN pos ON personal.pos_id = pos.id WHERE personal.status = :p1 AND personal.age BETWEEN :p2 AND :p3 AND pos.rank_id IN (:p4, :p5, :p6) ORDER BY personal.id DESC LIMIT 15",
-  
+  "isOk": true,
+  "sql": "SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) 
+    FROM (
+      SELECT json_build_object('fish', CONCAT(last_name, ' ', first_name), 'id', personal.id, 'passport', personal.jshshir, 'boshqarma', json_build_object('nomi', organization.name, 'kod', organization.code), 'lavozim_info', json_build_object('is_military', position.is_military_rank, 'lavozim', position.name)) AS uaq_data
+      FROM personal AS personal
+      INNER JOIN organization ON personal.organization_id = organization.id
+      LEFT JOIN position ON personal.position_id = position.id
+      WHERE personal.status = :p1 AND personal.age BETWEEN :p2 AND :p3 AND position.rank_id IN (:p4)
+      ORDER BY personal.id DESC
+      LIMIT 15
+    ) t",
   "params": {
     "p1": "active",
     "p2": 25,
     "p3": 45,
-    "p4": 1,
-    "p5": 2,
-    "p6": 3
+    "p4": 1
   },
-
   "structure": {
-    "employee": {
-      "fields": ["id", "full_name", "passport"],
-      "organization": {
-        "fields": ["name", "code"]
-      },
-      "position_info": {
-        "fields": ["title", "is_military"]
-      }
+    "@data": {
+      "id": "personal.id",
+      "fish": "CONCAT(last_name, ' ', first_name)",
+      "passport": "personal.jshshir",
+      "boshqarma": {"nomi": "organization.name", "kod": "organization.code"},
+      "lavozim_info": {"lavozim": "position.name", "is_military": "position.is_military_rank"}
     }
-  }
+  },
+  "message": "success"
 }
 ```
-  Oxirgi natija:
+   Yakuniy natija:
 ```json
-{
-  "status": "success",
-  "data": [
-    {
-      "id": 101,
-      "full_name": "Toshmatov Ali",
-      "passport": "1234567",
-      "organization": {
-        "name": "IIV",
-        "code": "001"
+[
+  {
+      "id": 42,
+      "fish": "Majidov Botir",
+      "passport": "31208930172347",
+      "boshqarma": {
+          "nomi": "Jizzax viloyat boshqarmasi",
+          "kod": "1001"
       },
-      "position_info": {
-        "title": "Katta inspektor",
-        "is_military": 1
+      "lavozim_info": {
+          "lavozim": "Buxgalter",
+          "is_military": 0
       }
-    }
-  ]
-}
+  }
+]
 ```
