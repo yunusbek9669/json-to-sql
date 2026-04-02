@@ -174,7 +174,11 @@ impl Guard {
             "AGE", "CAST", "ROUND", "CEIL", "FLOOR", "ABS", "POWER", "SQRT", "MOD", "SIGN", "SPLIT_PART", 
             "JSON_EXTRACT_PATH_TEXT", "JSONB_EXTRACT_PATH_TEXT", "CASE", "WHEN", "THEN", "ELSE", "END", 
             "AS", "IN", "IS", "NULL", "AND", "OR", "NOT", "TRUE", "FALSE", "YEAR", "MONTH", "DAY", "HOUR", 
-            "MINUTE", "SECOND", "FROM", "INTERVAL", "JSON_BUILD_OBJECT"
+            "MINUTE", "SECOND", "FROM", "INTERVAL", "JSON_BUILD_OBJECT",
+            "DESC", "ASC", "NULLS", "FIRST", "LAST", "BETWEEN", "LIKE", "ILIKE", "DISTINCT", "ALL", "ANY",
+            "EXISTS", "HAVING", "GROUP", "BY", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT",
+            "FILTER", "OVER", "PARTITION", "WINDOW", "ROWS", "RANGE", "UNBOUNDED", "PRECEDING", "FOLLOWING",
+            "MALE", "FEMALE"
         ];
 
         let mut result = String::with_capacity(field_sql.len() + 20);

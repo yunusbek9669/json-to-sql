@@ -9,15 +9,17 @@ pub struct FilterRule {
     pub value: String,    // Stored as string to be parsed or inserted directly as bound param
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceDef {
     pub table_name: String,
     pub filters: Vec<FilterRule>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+    pub order: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryNode {
     pub name: String,
+    pub is_list: bool,
     pub source: Option<SourceDef>,
     pub join: Option<String>,
     pub flatten: bool,
@@ -25,18 +27,7 @@ pub struct QueryNode {
     pub children: Vec<QueryNode>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GlobalConfig {
-    pub limit: Option<u64>,
-    pub offset: Option<u64>,
-    pub order: Option<String>,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootQuery {
-    pub nodes: Vec<QueryNode>,
-    pub config: GlobalConfig,
-}
 
 #[derive(Debug, Serialize)]
 pub struct ParseResult {

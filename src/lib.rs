@@ -63,13 +63,13 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         None
     };
 
-    let parse_result = match parser::parse_json(json_str) {
+    let root_node = match parser::parse_json(json_str) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Parse Error: {}", e)),
     };
 
     let generator = generator::SqlGenerator::new(whitelist, relations);
-    let sql_result = match generator.generate(parse_result) {
+    let sql_result = match generator.generate(root_node) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Generation Error: {}", e)),
     };
@@ -109,38 +109,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_employee_query() {
+    fn test_compact_format() {
+        // New compact format: no @data/@config wrappers
         let json_input = r#"{
-            "@data": {
-                "@source": "personal[status: 'active', age: 25..45]",
+            "@source": "personal[status: 'active', age: 25..45, $limit: 15, $order: personal.id DESC]",
+            "@fields": {
+                "id": "id",
+                "full_name": "CONCAT(last_name_latin, ' ', first_name_latin)",
+                "passport": "jshshir"
+            },
+            "organization": {
+                "@source": "org",
                 "@fields": {
-                    "id": "id",
-                    "full_name": "CONCAT(last_name_latin, ' ', first_name_latin)",
-                    "passport": "jshshir"
-                },
-                "organization": {
-                    "@source": "org",
-                    "@fields": {
-                        "name": "name_uz",
-                        "code": "code"
-                    }
-                },
-                "position_info": {
-                    "@source": "pos[rank_id: in (1, 2, 3)]",
-                    "@flatten": true,
-                    "@fields": {
-                        "title": "name_latin",
-                        "is_military": "is_military_rank"
-                    }
+                    "name": "name_uz",
+                    "code": "code"
                 }
             },
-            "@config": {
-                "limit": 15,
-                "order": "personal.id DESC"
+            "position_info": {
+                "@source": "pos[rank_id: in (1, 2, 3)]",
+                "@flatten": true,
+                "@fields": {
+                    "title": "name_latin",
+                    "is_military": "is_military_rank"
+                }
             }
         }"#;
 
         let root = parser::parse_json(json_input).expect("Should parse");
+        
+        // Verify $limit and $order were parsed
+        assert_eq!(root.source.as_ref().unwrap().limit, Some(15));
+        assert_eq!(root.source.as_ref().unwrap().order.as_deref(), Some("personal.id DESC"));
+        
         let mut rels = std::collections::HashMap::new();
         rels.insert("personal->org".to_string(), "INNER JOIN org ON personal.org_id = org.id".to_string());
         rels.insert("personal->pos".to_string(), "LEFT JOIN pos ON personal.pos_id = pos.id".to_string());
@@ -151,11 +151,43 @@ mod tests {
         assert!(sql_str.contains("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json)"));
         assert!(sql_str.contains("SELECT json_build_object("));
         assert!(sql_str.contains("'id', personal.id"));
-        assert!(sql_str.contains("'full_name', CONCAT(personal.last_name_latin, ' ', personal.first_name_latin)"));
+        assert!(sql_str.contains("CONCAT(personal.last_name_latin, ' ', personal.first_name_latin)"));
         assert!(sql_str.contains("INNER JOIN org ON personal.org_id = org.id"));
+        assert!(sql_str.contains("LIMIT 15"));
+        assert!(sql_str.contains("ORDER BY personal.id DESC"));
         assert!(result.params.as_ref().unwrap().len() > 0);
         
         let serialized = serde_json::to_string_pretty(&result).unwrap();
-        println!("Generated SQL Setup Form:\n{}", serialized);
+        println!("Generated SQL:\n{}", serialized);
+    }
+
+    #[test]
+    fn test_legacy_format() {
+        // Legacy format with @data/@config still works
+        let json_input = r#"{
+            "@data": {
+                "@source": "employee[status: 1, id: 1..45]",
+                "@fields": {
+                    "id": "id",
+                    "full_name": "CONCAT(last_name, ' ', first_name)"
+                }
+            },
+            "@config": {
+                "limit": 2,
+                "order": "employee.id DESC"
+            }
+        }"#;
+
+        let root = parser::parse_json(json_input).expect("Should parse legacy");
+        assert_eq!(root.source.as_ref().unwrap().limit, Some(2));
+        assert_eq!(root.source.as_ref().unwrap().order.as_deref(), Some("employee.id DESC"));
+        
+        let gen_inst = generator::SqlGenerator::new(None, None);
+        let result = gen_inst.generate(root).expect("Should generate");
+        let sql_str = result.sql.as_ref().unwrap();
+        assert!(sql_str.contains("LIMIT 2"));
+        assert!(sql_str.contains("ORDER BY employee.id DESC"));
+        
+        println!("Legacy SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
     }
 }

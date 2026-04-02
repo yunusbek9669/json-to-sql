@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use serde_json::{json, Value};
-use crate::models::{FilterRule, ParseResult, QueryNode, RootQuery};
+use crate::models::{FilterRule, ParseResult, QueryNode};
 use crate::guard::Guard;
 
 use indexmap::IndexMap;
@@ -28,36 +28,16 @@ impl SqlGenerator {
         }
     }
 
-    pub fn generate(mut self, root: RootQuery) -> Result<ParseResult, String> {
+    pub fn generate(mut self, root: QueryNode) -> Result<ParseResult, String> {
         let mut root_structure = serde_json::Map::new();
-        let mut root_json_objects = Vec::new();
         
-        for node in root.nodes {
-            let mut node_structure = serde_json::Map::new();
-            let child_args = self.process_node(&node, None, &mut node_structure)?;
-            let json_obj_expr = format!("json_build_object({})", child_args.join(", "));
-            
-            root_structure.insert(node.name.clone(), Value::Object(node_structure));
-            // Just push the generated object, dropping the outer name wrapper
-            root_json_objects.push(json_obj_expr);
-        }
+        let child_args = self.process_node(&root, None, &mut root_structure)?;
+        let json_obj_expr = format!("json_build_object({})", child_args.join(", "));
         
         // BASE SQL Construction
         let mut base_sql = String::new();
         base_sql.push_str("SELECT ");
-        
-        if root_json_objects.is_empty() {
-            base_sql.push_str("*");
-        } else if root_json_objects.len() == 1 {
-            base_sql.push_str(&format!("{} AS uaq_data", root_json_objects[0]));
-        } else {
-            // Fallback for multiple roots in the same query
-            let mut fallback_args = Vec::new();
-            for (i, expr) in root_json_objects.iter().enumerate() {
-                fallback_args.push(format!("'root{}', {}", i, expr));
-            }
-            base_sql.push_str(&format!("json_build_object({}) AS uaq_data", fallback_args.join(", ")));
-        }
+        base_sql.push_str(&format!("{} AS uaq_data", json_obj_expr));
         
         if !self.froms.is_empty() {
             base_sql.push_str("\nFROM ");
@@ -74,34 +54,33 @@ impl SqlGenerator {
             base_sql.push_str(&self.wheres.join(" AND "));
         }
         
-        if let Some(order) = root.config.order {
-            if self.guard.is_safe_order_by(&order).is_ok() {
-                base_sql.push_str("\nORDER BY ");
-                base_sql.push_str(&order);
+        // Order, limit, offset from root node's @source
+        if let Some(source) = &root.source {
+            let root_table = &source.table_name;
+            if let Some(order) = &source.order {
+                if self.guard.is_safe_order_by(order).is_ok() {
+                    let prefixed_order = Guard::auto_prefix_field(order, root_table);
+                    base_sql.push_str("\nORDER BY ");
+                    base_sql.push_str(&prefixed_order);
+                }
+            }
+            if let Some(limit) = source.limit {
+                base_sql.push_str(&format!("\nLIMIT {}", limit));
+            }
+            if let Some(offset) = source.offset {
+                base_sql.push_str(&format!("\nOFFSET {}", offset));
             }
         }
         
-        if let Some(limit) = root.config.limit {
-            base_sql.push_str(&format!("\nLIMIT {}", limit));
-        }
-        if let Some(offset) = root.config.offset {
-            base_sql.push_str(&format!("\nOFFSET {}", offset));
-        }
-        
-        // Wrap everything in json_agg to return a single JSON Array string
+        // Wrap in json_agg
         let mut final_sql = String::new();
-        if root_json_objects.is_empty() {
-            final_sql = base_sql;
-        } else {
-            final_sql.push_str("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) \nFROM (\n");
-            // Indent the base sql visually inside the subquery
-            for line in base_sql.lines() {
-                final_sql.push_str("  ");
-                final_sql.push_str(line);
-                final_sql.push_str("\n");
-            }
-            final_sql.push_str(") t");
+        final_sql.push_str("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) \nFROM (\n");
+        for line in base_sql.lines() {
+            final_sql.push_str("  ");
+            final_sql.push_str(line);
+            final_sql.push_str("\n");
         }
+        final_sql.push_str(") t");
         
         Ok(ParseResult {
             is_ok: true,
@@ -125,7 +104,8 @@ impl SqlGenerator {
             // If parent_table is None, this is a root node -> FROM
             if parent_table.is_none() {
                 self.froms.push(format!("{} AS {}", source.table_name, table_alias));
-            } else {
+            } else if !node.is_list {
+                // Normal scalar child -> regular JOIN
                 let p_table = parent_table.unwrap();
                 let c_table = &source.table_name;
                 
@@ -147,18 +127,21 @@ impl SqlGenerator {
 
                 if let Some(j) = j_str {
                     if !j.to_uppercase().contains("JOIN") {
-                        return Err(format!("Invalid JOIN syntax inside relation map for {}->{}", p_table, c_table));
+                        return Err(format!("Invalid JOIN syntax for {}->{}", p_table, c_table));
                     }
                     self.joins.push(j);
                 } else {
                     return Err(format!("No @join provided and no relation defined for {}->{}", p_table, c_table));
                 }
             }
+            // is_list nodes are handled separately below (LATERAL subquery)
             
-            // Process Filters
-            for filter in &source.filters {
-                let condition = self.build_condition(&table_alias, filter)?;
-                self.wheres.push(condition);
+            // Process Filters (only for non-list or root nodes)
+            if !node.is_list {
+                for filter in &source.filters {
+                    let condition = self.build_condition(&table_alias, filter)?;
+                    self.wheres.push(condition);
+                }
             }
         }
         
@@ -171,28 +154,209 @@ impl SqlGenerator {
             let processed_field = Guard::auto_prefix_field(field_sql, &table_alias);
             json_object_args.push(format!("'{}', {}", field_key, processed_field));
             
-            // Still populate structure for backwards compatibility / metadata if needed
             structure.insert(field_key.to_string(), json!(processed_field));
         }
         
         // Process children recursively
         for child in &node.children {
-            let mut child_struct = serde_json::Map::new();
-            let child_args = self.process_node(child, Some(&table_alias), &mut child_struct)?;
-            
-            if child.flatten {
-                // Flatten: add the child arguments to the current level without wrapper
-                json_object_args.extend(child_args);
-                for (k, v) in child_struct {
-                    structure.insert(k, v);
+            if child.is_list {
+                // --- LATERAL SUBQUERY for list (One-to-Many) ---
+                let list_result = self.build_lateral_subquery(child, &table_alias)?;
+                let lateral_alias = format!("{}_list", child.name);
+                
+                self.joins.push(format!(
+                    "LEFT JOIN LATERAL (\n  {}\n) {} ON true",
+                    list_result.sql, lateral_alias
+                ));
+                
+                json_object_args.push(format!("'{}', {}.array_data", child.name, lateral_alias));
+                
+                let mut child_struct = serde_json::Map::new();
+                child_struct.insert("_type".to_string(), json!("array"));
+                for (k, v) in list_result.structure {
+                    child_struct.insert(k, v);
                 }
-            } else {
-                json_object_args.push(format!("'{}', json_build_object({})", child.name, child_args.join(", ")));
                 structure.insert(child.name.clone(), Value::Object(child_struct));
+            } else {
+                let mut child_struct = serde_json::Map::new();
+                let child_args = self.process_node(child, Some(&table_alias), &mut child_struct)?;
+                
+                if child.flatten {
+                    json_object_args.extend(child_args);
+                    for (k, v) in child_struct {
+                        structure.insert(k, v);
+                    }
+                } else {
+                    json_object_args.push(format!("'{}', json_build_object({})", child.name, child_args.join(", ")));
+                    structure.insert(child.name.clone(), Value::Object(child_struct));
+                }
             }
         }
         
         Ok(json_object_args)
+    }
+
+    /// Builds a LATERAL subquery for list (One-to-Many) nodes.
+    fn build_lateral_subquery(&mut self, node: &QueryNode, parent_table: &str) -> Result<LateralResult, String> {
+        let source = node.source.as_ref()
+            .ok_or_else(|| format!("List node '{}' must have @source", node.name))?;
+        
+        self.guard.validate_table(&source.table_name)?;
+        let table_alias = &source.table_name;
+        
+        // Build the inner json_build_object fields
+        let mut inner_args = Vec::new();
+        let mut inner_structure = serde_json::Map::new();
+        
+        for (field_key, field_sql) in &node.fields {
+            self.guard.validate_field(table_alias, field_sql)?;
+            let processed = Guard::auto_prefix_field(field_sql, table_alias);
+            inner_args.push(format!("'{}', {}", field_key, processed));
+            inner_structure.insert(field_key.to_string(), json!(processed));
+        }
+        
+        // Build inner joins and where for children of the list node
+        let mut inner_joins = Vec::new();
+        let mut inner_wheres = Vec::new();
+        
+        // Recursively collect flatten children fields
+        self.collect_list_children(node, table_alias, &mut inner_args, &mut inner_joins, &mut inner_wheres, &mut inner_structure)?;
+        
+        let json_obj = format!("json_build_object({})", inner_args.join(", "));
+        
+        // Build the JOIN between parent and this list node
+        let c_table = &source.table_name;
+        let key_dir = format!("{}->{}", parent_table, c_table);
+        let key_bi1 = format!("{}<->{}", parent_table, c_table);
+        let key_bi2 = format!("{}<->{}", c_table, parent_table);
+
+        let join_condition = if let Some(j) = &node.join {
+            // Extract ON condition from JOIN string
+            extract_on_condition(j)?
+        } else if let Some(r) = self.relations.get(&key_dir) {
+            extract_on_condition(r)?
+        } else if let Some(r) = self.relations.get(&key_bi1) {
+            let replaced = r.replace("@table", c_table);
+            extract_on_condition(&replaced)?
+        } else if let Some(r) = self.relations.get(&key_bi2) {
+            let replaced = r.replace("@table", c_table);
+            extract_on_condition(&replaced)?
+        } else {
+            return Err(format!("No relation defined for list {}->{}", parent_table, c_table));
+        };
+        
+        // Build WHERE clause
+        let mut where_parts = vec![join_condition];
+        for filter in &source.filters {
+            let cond = self.build_condition(table_alias, filter)?;
+            where_parts.push(cond);
+        }
+        where_parts.extend(inner_wheres);
+        
+        // Build inner SELECT (rows with ORDER BY / LIMIT)
+        let mut inner_sql = format!(
+            "SELECT {} AS item\n    FROM {}",
+            json_obj, source.table_name
+        );
+        
+        // Add inner joins
+        for ij in &inner_joins {
+            inner_sql.push_str(&format!("\n    {}", ij));
+        }
+        
+        inner_sql.push_str(&format!("\n    WHERE {}", where_parts.join(" AND ")));
+        
+        if let Some(order) = &source.order {
+            if self.guard.is_safe_order_by(order).is_ok() {
+                let prefixed_order = Guard::auto_prefix_field(order, table_alias);
+                inner_sql.push_str(&format!("\n    ORDER BY {}", prefixed_order));
+            }
+        }
+        if let Some(limit) = source.limit {
+            inner_sql.push_str(&format!("\n    LIMIT {}", limit));
+        }
+        if let Some(offset) = source.offset {
+            inner_sql.push_str(&format!("\n    OFFSET {}", offset));
+        }
+        
+        // Wrap with json_agg on the outside
+        let sql = format!(
+            "SELECT COALESCE(json_agg(sub.item), '[]'::json) AS array_data\n  FROM (\n    {}\n  ) sub",
+            inner_sql
+        );
+        
+        Ok(LateralResult { sql, structure: inner_structure })
+    }
+    
+    /// Recursively collect flatten children of a list node
+    fn collect_list_children(
+        &mut self,
+        node: &QueryNode,
+        _parent_table: &str,
+        args: &mut Vec<String>,
+        joins: &mut Vec<String>,
+        wheres: &mut Vec<String>,
+        structure: &mut serde_json::Map<String, Value>,
+    ) -> Result<(), String> {
+        for child in &node.children {
+            let child_source = child.source.as_ref();
+            
+            if let Some(source) = child_source {
+                self.guard.validate_table(&source.table_name)?;
+                let child_table = &source.table_name;
+                let parent_of_child = if let Some(ns) = &node.source {
+                    &ns.table_name
+                } else {
+                    _parent_table
+                };
+                
+                // Find join for this child
+                let key_dir = format!("{}->{}", parent_of_child, child_table);
+                let key_bi1 = format!("{}<->{}", parent_of_child, child_table);
+                let key_bi2 = format!("{}<->{}", child_table, parent_of_child);
+
+                let j_str = if let Some(j) = &child.join {
+                    Some(j.clone())
+                } else if let Some(r) = self.relations.get(&key_dir) {
+                    Some(r.clone())
+                } else if let Some(r) = self.relations.get(&key_bi1) {
+                    Some(r.replace("@table", child_table))
+                } else if let Some(r) = self.relations.get(&key_bi2) {
+                    Some(r.replace("@table", child_table))
+                } else {
+                    None
+                };
+                
+                if let Some(j) = j_str {
+                    joins.push(j);
+                } else {
+                    return Err(format!("No relation for {}->{}", parent_of_child, child_table));
+                }
+                
+                for filter in &source.filters {
+                    let cond = self.build_condition(child_table, filter)?;
+                    wheres.push(cond);
+                }
+                
+                for (fk, fv) in &child.fields {
+                    self.guard.validate_field(child_table, fv)?;
+                    let processed = Guard::auto_prefix_field(fv, child_table);
+                    
+                    if child.flatten {
+                        args.push(format!("'{}', {}", fk, processed));
+                        structure.insert(fk.to_string(), json!(processed));
+                    } else {
+                        // Non-flatten children in list: create nested object
+                        args.push(format!("'{}', {}", fk, processed));
+                        structure.insert(fk.to_string(), json!(processed));
+                    }
+                }
+                
+                // Recurse for deeper children
+                self.collect_list_children(child, child_table, args, joins, wheres, structure)?;
+            }
+        }
+        Ok(())
     }
 
     fn build_condition(&mut self, table_alias: &str, filter: &FilterRule) -> Result<String, String> {
@@ -258,5 +422,22 @@ impl SqlGenerator {
         let param_placeholder = format!(":{}", param_name);
         self.params.insert(param_name, val);
         param_placeholder
+    }
+}
+
+struct LateralResult {
+    sql: String,
+    structure: serde_json::Map<String, Value>,
+}
+
+/// Extracts the ON condition from a JOIN string.
+/// E.g. "INNER JOIN foo ON bar.id = foo.bar_id AND foo.status = 1"
+/// => "bar.id = foo.bar_id AND foo.status = 1"
+fn extract_on_condition(join_str: &str) -> Result<String, String> {
+    let upper = join_str.to_uppercase();
+    if let Some(pos) = upper.find(" ON ") {
+        Ok(join_str[pos + 4..].trim().to_string())
+    } else {
+        Err(format!("Cannot extract ON condition from: {}", join_str))
     }
 }
