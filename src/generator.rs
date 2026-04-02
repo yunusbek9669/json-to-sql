@@ -6,90 +6,116 @@ use crate::guard::Guard;
 pub struct SqlGenerator {
     param_counter: usize,
     params: HashMap<String, Value>,
-    selects: Vec<String>,
     froms: Vec<String>,
     joins: Vec<String>,
     wheres: Vec<String>,
+    guard: Guard,
 }
 
 impl SqlGenerator {
-    pub fn new() -> Self {
+    pub fn new(whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
         Self {
             param_counter: 0,
             params: HashMap::new(),
-            selects: Vec::new(),
             froms: Vec::new(),
             joins: Vec::new(),
             wheres: Vec::new(),
+            guard: Guard::new(whitelist),
         }
     }
 
     pub fn generate(mut self, root: RootQuery) -> Result<ParseResult, String> {
         let mut root_structure = serde_json::Map::new();
+        let mut root_json_objects = Vec::new();
         
         for node in root.nodes {
             let mut node_structure = serde_json::Map::new();
-            self.process_node(&node, &mut node_structure)?;
+            let json_obj_expr = self.process_node(&node, &mut node_structure)?;
+            
             root_structure.insert(node.name.clone(), Value::Object(node_structure));
+            // Just push the generated object, dropping the outer name wrapper
+            root_json_objects.push(json_obj_expr);
         }
         
-        let mut sql = String::new();
+        // BASE SQL Construction
+        let mut base_sql = String::new();
+        base_sql.push_str("SELECT ");
         
-        // SELECT
-        sql.push_str("SELECT ");
-        if self.selects.is_empty() {
-            sql.push_str("*");
+        if root_json_objects.is_empty() {
+            base_sql.push_str("*");
+        } else if root_json_objects.len() == 1 {
+            base_sql.push_str(&format!("{} AS uaq_data", root_json_objects[0]));
         } else {
-            sql.push_str(&self.selects.join(", "));
+            // Fallback for multiple roots in the same query
+            let mut fallback_args = Vec::new();
+            for (i, expr) in root_json_objects.iter().enumerate() {
+                fallback_args.push(format!("'root{}', {}", i, expr));
+            }
+            base_sql.push_str(&format!("json_build_object({}) AS uaq_data", fallback_args.join(", ")));
         }
         
-        // FROM
         if !self.froms.is_empty() {
-            sql.push_str("\nFROM ");
-            sql.push_str(&self.froms.join(", "));
+            base_sql.push_str("\nFROM ");
+            base_sql.push_str(&self.froms.join(", "));
         }
         
-        // JOIN
         if !self.joins.is_empty() {
-            sql.push_str("\n");
-            sql.push_str(&self.joins.join("\n"));
+            base_sql.push_str("\n");
+            base_sql.push_str(&self.joins.join("\n"));
         }
         
-        // WHERE
         if !self.wheres.is_empty() {
-            sql.push_str("\nWHERE ");
-            sql.push_str(&self.wheres.join(" AND "));
+            base_sql.push_str("\nWHERE ");
+            base_sql.push_str(&self.wheres.join(" AND "));
         }
         
-        // ORDER BY
         if let Some(order) = root.config.order {
-            if Guard::is_safe_order_by(&order) {
-                sql.push_str("\nORDER BY ");
-                sql.push_str(&order);
+            if self.guard.is_safe_order_by(&order).is_ok() {
+                base_sql.push_str("\nORDER BY ");
+                base_sql.push_str(&order);
             }
         }
         
-        // LIMIT & OFFSET
         if let Some(limit) = root.config.limit {
-            sql.push_str(&format!("\nLIMIT {}", limit));
+            base_sql.push_str(&format!("\nLIMIT {}", limit));
         }
         if let Some(offset) = root.config.offset {
-            sql.push_str(&format!("\nOFFSET {}", offset));
+            base_sql.push_str(&format!("\nOFFSET {}", offset));
+        }
+        
+        // Wrap everything in json_agg to return a single JSON Array string
+        let mut final_sql = String::new();
+        if root_json_objects.is_empty() {
+            final_sql = base_sql;
+        } else {
+            final_sql.push_str("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) \nFROM (\n");
+            // Indent the base sql visually inside the subquery
+            for line in base_sql.lines() {
+                final_sql.push_str("  ");
+                final_sql.push_str(line);
+                final_sql.push_str("\n");
+            }
+            final_sql.push_str(") t");
         }
         
         Ok(ParseResult {
-            sql,
-            params: self.params,
-            structure: Value::Object(root_structure),
+            is_ok: true,
+            sql: Some(final_sql),
+            params: Some(self.params),
+            structure: Some(Value::Object(root_structure)),
+            message: "success".to_string(),
         })
     }
 
-    fn process_node(&mut self, node: &QueryNode, structure: &mut serde_json::Map<String, Value>) -> Result<(), String> {
-        // Table Name Handling
-        let table_alias = &node.name;
+    fn process_node(&mut self, node: &QueryNode, structure: &mut serde_json::Map<String, Value>) -> Result<String, String> {
+        let table_alias = if let Some(source) = &node.source {
+            source.table_name.clone()
+        } else {
+            node.name.clone()
+        };
         
         if let Some(source) = &node.source {
-            Guard::validate_table(&source.table_name)?;
+            self.guard.validate_table(&source.table_name)?;
             
             // If it's the root node (has @source but no @join), it goes to FROM
             if node.join.is_none() {
@@ -98,61 +124,60 @@ impl SqlGenerator {
             
             // Process Filters
             for filter in &source.filters {
-                let condition = self.build_condition(table_alias, filter)?;
+                let condition = self.build_condition(&table_alias, filter)?;
                 self.wheres.push(condition);
             }
         }
         
         // Joins
         if let Some(join) = &node.join {
-            // Very simple validation check:
             if !join.to_uppercase().contains("JOIN") {
                 return Err("Invalid JOIN syntax".to_string());
             }
             self.joins.push(join.clone());
         }
         
+        // Construct the parts inside JSON_OBJECT for this node
+        let mut json_object_args = Vec::new();
+        
         // Fields
-        let mut field_map = serde_json::Map::new();
         for (field_key, field_sql) in &node.fields {
-            Guard::validate_field(field_sql)?;
+            self.guard.validate_field(&table_alias, field_sql)?;
             
-            let alias = format!("{}_{}", table_alias, field_key);
-            
-            // E.g., CONCAT(...) or just a column name
             let processed_field = if field_sql.contains('(') {
-                // Keep raw if it looks like a function, but we already validated it
-                format!("{} AS {}", field_sql, alias)
+                field_sql.clone()
+            } else if field_sql.to_uppercase().trim().starts_with("CASE ") {
+                field_sql.clone()
+            } else if field_sql.starts_with('\'') && field_sql.ends_with('\'') {
+                field_sql.clone()
+            } else if field_sql.parse::<f64>().is_ok() {
+                field_sql.clone()
+            } else if field_sql.contains('.') {
+                field_sql.clone()
             } else {
-                // Prefix with table alias if no prefix exists
-                if field_sql.contains('.') {
-                    format!("{} AS {}", field_sql, alias)
-                } else {
-                    format!("{}.{} AS {}", table_alias, field_sql, alias)
-                }
+                format!("{}.{}", table_alias, field_sql)
             };
             
-            self.selects.push(processed_field);
-            field_map.insert(field_key.to_string(), json!(alias));
-        }
-        
-        // Merge fields to structure
-        for (k, v) in field_map {
-            structure.insert(k, v);
+            json_object_args.push(format!("'{}', {}", field_key, processed_field));
+            
+            // Still populate structure for backwards compatibility / metadata if needed
+            structure.insert(field_key.to_string(), json!(processed_field));
         }
         
         // Process children recursively
         for child in &node.children {
             let mut child_struct = serde_json::Map::new();
-            self.process_node(child, &mut child_struct)?;
+            let child_json_expr = self.process_node(child, &mut child_struct)?;
+            
+            json_object_args.push(format!("'{}', {}", child.name, child_json_expr));
             structure.insert(child.name.clone(), Value::Object(child_struct));
         }
         
-        Ok(())
+        Ok(format!("json_build_object({})", json_object_args.join(", ")))
     }
 
     fn build_condition(&mut self, table_alias: &str, filter: &FilterRule) -> Result<String, String> {
-        Guard::validate_identifier(&filter.field)?;
+        self.guard.validate_column(table_alias, &filter.field)?;
         
         let column_ref = format!("{}.{}", table_alias, filter.field);
         
@@ -166,7 +191,6 @@ impl SqlGenerator {
                 Ok(format!("{} != {}", column_ref, p))
             }
             "gt" => {
-                // Might be a number instead of string, we can try to parse it
                 let p = self.next_param_numeric_or_string(&filter.value);
                 Ok(format!("{} > {}", column_ref, p))
             }
@@ -179,7 +203,6 @@ impl SqlGenerator {
                 Ok(format!("{} LIKE {}", column_ref, p))
             }
             "in" => {
-                // handle "in (1, 2, 3)" or just "1, 2, 3"
                 let val = filter.value.trim_matches(|c| c == '(' || c == ')');
                 let parts: Vec<&str> = val.split(',').collect();
                 let mut param_names = Vec::new();
@@ -189,7 +212,6 @@ impl SqlGenerator {
                 Ok(format!("{} IN ({})", column_ref, param_names.join(", ")))
             }
             "between" => {
-                // "25..45"
                 if let Some((start, end)) = filter.value.split_once("..") {
                     let p1 = self.next_param_numeric_or_string(start.trim());
                     let p2 = self.next_param_numeric_or_string(end.trim());
@@ -203,11 +225,9 @@ impl SqlGenerator {
     }
 
     fn next_param_numeric_or_string(&mut self, val: &str) -> String {
-        // Simple heuristic: if it parses as number, treat as number param, else string
         if let Ok(n) = val.parse::<f64>() {
             self.next_param(json!(n))
         } else {
-            // Strip single quotes if they exist
             let clean_val = val.trim_matches('\'').to_string();
             self.next_param(Value::String(clean_val))
         }

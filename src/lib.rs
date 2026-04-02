@@ -7,12 +7,14 @@ use libc::c_char;
 use std::ffi::{CStr, CString};
 use serde_json::json;
 
+use std::collections::HashMap;
+
 /// Parses a declarative JSON string and returns a parameterized SQL JSON result.
 /// 
 /// Returns a heap-allocated C string. Ownership is transferred to the caller.
 /// The caller MUST free the string using `uaq_free_string`.
 #[unsafe(no_mangle)]
-pub extern "C" fn uaq_parse(json_input: *const c_char) -> *mut c_char {
+pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c_char) -> *mut c_char {
     if json_input.is_null() {
         return create_error_result("Input is null");
     }
@@ -23,12 +25,31 @@ pub extern "C" fn uaq_parse(json_input: *const c_char) -> *mut c_char {
         Err(_) => return create_error_result("Invalid UTF-8 in input"),
     };
 
+    let whitelist_str = if whitelist_input.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(whitelist_input).to_str().ok() }
+    };
+    
+    let whitelist: Option<HashMap<String, Vec<String>>> = if let Some(s) = whitelist_str {
+        if s.trim().is_empty() {
+             None
+        } else {
+             match serde_json::from_str(s) {
+                 Ok(w) => Some(w),
+                 Err(e) => return create_error_result(&format!("Whitelist Parse Error: {}", e)),
+             }
+        }
+    } else {
+        None
+    };
+
     let parse_result = match parser::parse_json(json_str) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Parse Error: {}", e)),
     };
 
-    let generator = generator::SqlGenerator::new();
+    let generator = generator::SqlGenerator::new(whitelist);
     let sql_result = match generator.generate(parse_result) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Generation Error: {}", e)),
@@ -54,7 +75,10 @@ pub extern "C" fn uaq_free_string(s: *mut c_char) {
 
 fn create_error_result(msg: &str) -> *mut c_char {
     let err_json = json!({
-        "error": true,
+        "isOk": false,
+        "sql": null,
+        "params": null,
+        "structure": null,
         "message": msg
     });
     let s = serde_json::to_string(&err_json).unwrap();
@@ -68,7 +92,7 @@ mod tests {
     #[test]
     fn test_employee_query() {
         let json_input = r#"{
-            "employee": {
+            "@data": {
                 "@source": "personal[status: 'active', age: 25..45]",
                 "@fields": {
                     "id": "id",
@@ -99,14 +123,16 @@ mod tests {
         }"#;
 
         let root = parser::parse_json(json_input).expect("Should parse");
-        let gen_inst = generator::SqlGenerator::new();
+        let gen_inst = generator::SqlGenerator::new(None);
         let result = gen_inst.generate(root).expect("Should generate");
 
-        assert!(result.sql.contains("SELECT"));
-        assert!(result.sql.contains("employee_id"));
-        assert!(result.sql.contains("employee_full_name"));
-        assert!(result.sql.contains("INNER JOIN org ON personal.org_id = org.id"));
-        assert!(result.params.len() > 0);
+        let sql_str = result.sql.as_ref().unwrap();
+        assert!(sql_str.contains("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json)"));
+        assert!(sql_str.contains("SELECT json_build_object("));
+        assert!(sql_str.contains("'id', personal.id"));
+        assert!(sql_str.contains("'full_name', CONCAT(last_name_latin, ' ', first_name_latin)"));
+        assert!(sql_str.contains("INNER JOIN org ON personal.org_id = org.id"));
+        assert!(result.params.as_ref().unwrap().len() > 0);
         
         let serialized = serde_json::to_string_pretty(&result).unwrap();
         println!("Generated SQL Setup Form:\n{}", serialized);
