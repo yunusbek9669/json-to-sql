@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// Returns a heap-allocated C string. Ownership is transferred to the caller.
 /// The caller MUST free the string using `uaq_free_string`.
 #[unsafe(no_mangle)]
-pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c_char) -> *mut c_char {
+pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c_char, relations_input: *const c_char) -> *mut c_char {
     if json_input.is_null() {
         return create_error_result("Input is null");
     }
@@ -44,12 +44,31 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         None
     };
 
+    let relations_str = if relations_input.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(relations_input).to_str().ok() }
+    };
+    
+    let relations: Option<HashMap<String, String>> = if let Some(s) = relations_str {
+        if s.trim().is_empty() {
+             None
+        } else {
+             match serde_json::from_str(s) {
+                 Ok(r) => Some(r),
+                 Err(e) => return create_error_result(&format!("Relations Parse Error: {}", e)),
+             }
+        }
+    } else {
+        None
+    };
+
     let parse_result = match parser::parse_json(json_str) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Parse Error: {}", e)),
     };
 
-    let generator = generator::SqlGenerator::new(whitelist);
+    let generator = generator::SqlGenerator::new(whitelist, relations);
     let sql_result = match generator.generate(parse_result) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Generation Error: {}", e)),
@@ -101,7 +120,6 @@ mod tests {
                 },
                 "organization": {
                     "@source": "org",
-                    "@join": "INNER JOIN org ON personal.org_id = org.id",
                     "@fields": {
                         "name": "name_uz",
                         "code": "code"
@@ -109,7 +127,7 @@ mod tests {
                 },
                 "position_info": {
                     "@source": "pos[rank_id: in (1, 2, 3)]",
-                    "@join": "LEFT JOIN pos ON personal.pos_id = pos.id",
+                    "@flatten": true,
                     "@fields": {
                         "title": "name_latin",
                         "is_military": "is_military_rank"
@@ -123,7 +141,10 @@ mod tests {
         }"#;
 
         let root = parser::parse_json(json_input).expect("Should parse");
-        let gen_inst = generator::SqlGenerator::new(None);
+        let mut rels = std::collections::HashMap::new();
+        rels.insert("personal->org".to_string(), "INNER JOIN org ON personal.org_id = org.id".to_string());
+        rels.insert("personal->pos".to_string(), "LEFT JOIN pos ON personal.pos_id = pos.id".to_string());
+        let gen_inst = generator::SqlGenerator::new(None, Some(rels));
         let result = gen_inst.generate(root).expect("Should generate");
 
         let sql_str = result.sql.as_ref().unwrap();

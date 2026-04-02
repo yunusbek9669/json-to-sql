@@ -30,7 +30,6 @@
     },
     "boshqarma": {
       "@source": "organization",
-      "@join": "INNER JOIN organization ON personal.organization_id = organization.id",
       "@fields": {
         "nomi": "name",
         "kod": "code"
@@ -38,7 +37,7 @@
     },
     "lavozim_info": {
       "@source": "position[rank_id: in (1, 2, 3)]",
-      "@join": "LEFT JOIN position ON personal.position_id = position.id",
+      "@flatten": true,
       "@fields": {
         "lavozim": "name",
         "is_military": "is_military_rank"
@@ -49,6 +48,26 @@
     "limit": 15,
     "order": "personal.id DESC"
   }
+}
+```
+
+### Whitelist Input Example (2nd Parameter)
+Ushbu JSON Backend Controller tarafidan beriladi va mijoz (klient) qaysi jadvalning aynan qaysi ustunlarini o'qish imkoniga ega ekanligini qat'iy cheklaydi (SQL Injection va ruxsatsiz ma'lumotlar sirqib chiqishining oldini oladi). Hech kim belgilangan ro'yxatdan tasdiqlanmagan ustunlarni (masalan `password`, `token`) chaqira olmaydi.
+```json
+{
+  "personal": ["id", "last_name", "first_name", "jshshir", "status", "age", "organization_id", "position_id"],
+  "organization": ["id", "name", "code"],
+  "position": ["*"]
+}
+```
+*Eslatma: Agar biror jadvalning barcha ustunlariga ruxsat bermoqchi bo'lsangiz `["*"]` yozib qo'yishingiz ham mumkin.*
+
+### Relations Input Example (3rd Parameter - Auto-Join)
+Ushbu xarita orqali siz jadvallarning o'zaro qay usulda JOIN bo'lishini Backendda saqlab qolasiz. UAQ Engine qaysi jadval nima bilan ulanishi kerak ekanligini ushbu Configuration dan avtomatik aniqlaydi.
+```json
+{
+  "personal->organization": "INNER JOIN organization ON personal.organization_id = organization.id",
+  "personal->position": "LEFT JOIN position ON personal.position_id = position.id AND position.deleted_at IS NULL"
 }
 ```
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,7 +20,8 @@ pub struct QueryNode {
     pub name: String,
     pub source: Option<SourceDef>,
     pub join: Option<String>,
-    pub fields: HashMap<String, String>,
+    pub flatten: bool,
+    pub fields: IndexMap<String, String>,
     pub children: Vec<QueryNode>,
 }
 
@@ -42,7 +43,7 @@ pub struct ParseResult {
     #[serde(rename = "isOk")]
     pub is_ok: bool,
     pub sql: Option<String>,
-    pub params: Option<HashMap<String, Value>>,
+    pub params: Option<IndexMap<String, Value>>,
     pub structure: Option<Value>,
     pub message: String,
 }

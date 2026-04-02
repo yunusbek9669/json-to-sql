@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+
+use indexmap::IndexMap;
 use serde_json::Value;
 use regex::Regex;
 
@@ -105,7 +106,8 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
         name: name.to_string(),
         source: None,
         join: None,
-        fields: HashMap::new(),
+        flatten: false,
+        fields: IndexMap::new(),
         children: Vec::new(),
     };
     
@@ -128,6 +130,11 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
                             node.fields.insert(fk.clone(), fvs.clone());
                         }
                     }
+                }
+            }
+            "@flatten" => {
+                if let Value::Bool(b) = v {
+                    node.flatten = *b;
                 }
             }
             _ => {

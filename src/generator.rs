@@ -3,24 +3,28 @@ use serde_json::{json, Value};
 use crate::models::{FilterRule, ParseResult, QueryNode, RootQuery};
 use crate::guard::Guard;
 
+use indexmap::IndexMap;
+
 pub struct SqlGenerator {
     param_counter: usize,
-    params: HashMap<String, Value>,
+    params: IndexMap<String, Value>,
     froms: Vec<String>,
     joins: Vec<String>,
     wheres: Vec<String>,
     guard: Guard,
+    relations: HashMap<String, String>,
 }
 
 impl SqlGenerator {
-    pub fn new(whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
+    pub fn new(whitelist: Option<HashMap<String, Vec<String>>>, relations: Option<HashMap<String, String>>) -> Self {
         Self {
             param_counter: 0,
-            params: HashMap::new(),
+            params: IndexMap::new(),
             froms: Vec::new(),
             joins: Vec::new(),
             wheres: Vec::new(),
             guard: Guard::new(whitelist),
+            relations: relations.unwrap_or_default(),
         }
     }
 
@@ -30,7 +34,8 @@ impl SqlGenerator {
         
         for node in root.nodes {
             let mut node_structure = serde_json::Map::new();
-            let json_obj_expr = self.process_node(&node, &mut node_structure)?;
+            let child_args = self.process_node(&node, None, &mut node_structure)?;
+            let json_obj_expr = format!("json_build_object({})", child_args.join(", "));
             
             root_structure.insert(node.name.clone(), Value::Object(node_structure));
             // Just push the generated object, dropping the outer name wrapper
@@ -107,7 +112,7 @@ impl SqlGenerator {
         })
     }
 
-    fn process_node(&mut self, node: &QueryNode, structure: &mut serde_json::Map<String, Value>) -> Result<String, String> {
+    fn process_node(&mut self, node: &QueryNode, parent_table: Option<&str>, structure: &mut serde_json::Map<String, Value>) -> Result<Vec<String>, String> {
         let table_alias = if let Some(source) = &node.source {
             source.table_name.clone()
         } else {
@@ -117,9 +122,25 @@ impl SqlGenerator {
         if let Some(source) = &node.source {
             self.guard.validate_table(&source.table_name)?;
             
-            // If it's the root node (has @source but no @join), it goes to FROM
-            if node.join.is_none() {
+            // If parent_table is None, this is a root node -> FROM
+            if parent_table.is_none() {
                 self.froms.push(format!("{} AS {}", source.table_name, table_alias));
+            } else {
+                let j_str = if let Some(j) = &node.join {
+                    Some(j.clone())
+                } else {
+                    let key = format!("{}->{}", parent_table.unwrap(), source.table_name);
+                    self.relations.get(&key).cloned()
+                };
+
+                if let Some(j) = j_str {
+                    if !j.to_uppercase().contains("JOIN") {
+                        return Err(format!("Invalid JOIN syntax inside relation map for {}->{}", parent_table.unwrap(), source.table_name));
+                    }
+                    self.joins.push(j);
+                } else {
+                    return Err(format!("No @join provided and no relation defined for {}->{}", parent_table.unwrap(), source.table_name));
+                }
             }
             
             // Process Filters
@@ -127,14 +148,6 @@ impl SqlGenerator {
                 let condition = self.build_condition(&table_alias, filter)?;
                 self.wheres.push(condition);
             }
-        }
-        
-        // Joins
-        if let Some(join) = &node.join {
-            if !join.to_uppercase().contains("JOIN") {
-                return Err("Invalid JOIN syntax".to_string());
-            }
-            self.joins.push(join.clone());
         }
         
         // Construct the parts inside JSON_OBJECT for this node
@@ -167,13 +180,21 @@ impl SqlGenerator {
         // Process children recursively
         for child in &node.children {
             let mut child_struct = serde_json::Map::new();
-            let child_json_expr = self.process_node(child, &mut child_struct)?;
+            let child_args = self.process_node(child, Some(&table_alias), &mut child_struct)?;
             
-            json_object_args.push(format!("'{}', {}", child.name, child_json_expr));
-            structure.insert(child.name.clone(), Value::Object(child_struct));
+            if child.flatten {
+                // Flatten: add the child arguments to the current level without wrapper
+                json_object_args.extend(child_args);
+                for (k, v) in child_struct {
+                    structure.insert(k, v);
+                }
+            } else {
+                json_object_args.push(format!("'{}', json_build_object({})", child.name, child_args.join(", ")));
+                structure.insert(child.name.clone(), Value::Object(child_struct));
+            }
         }
         
-        Ok(format!("json_build_object({})", json_object_args.join(", ")))
+        Ok(json_object_args)
     }
 
     fn build_condition(&mut self, table_alias: &str, filter: &FilterRule) -> Result<String, String> {
