@@ -57,6 +57,7 @@ Ushbu JSON Backend Controller tarafidan beriladi va mijoz (klient) qaysi jadvaln
 {
   "personal": ["id", "last_name", "first_name", "jshshir", "status", "age", "organization_id", "position_id"],
   "organization": ["id", "name", "code"],
+  "department": ["id", "name"],
   "position": ["*"]
 }
 ```
@@ -67,7 +68,8 @@ Ushbu xarita orqali siz jadvallarning o'zaro qay usulda JOIN bo'lishini Backendd
 ```json
 {
   "personal->organization": "INNER JOIN organization ON personal.organization_id = organization.id",
-  "personal->position": "LEFT JOIN position ON personal.position_id = position.id AND position.deleted_at IS NULL"
+  "personal->position": "LEFT JOIN position ON personal.position_id = position.id AND position.deleted_at IS NULL",
+  "organization<->department": "LEFT JOIN @table ON organization.id = department.organization_id"
 }
 ```
 
