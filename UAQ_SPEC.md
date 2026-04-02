@@ -150,7 +150,7 @@ struct ParseResult {
   {
       "id": 42,
       "fish": "Majidov Botir",
-      "passport": "31208930172347",
+      "passport": "11111111111111",
       "boshqarma": {
           "nomi": "Jizzax viloyat boshqarmasi",
           "kod": "1001"
