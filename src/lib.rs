@@ -151,7 +151,7 @@ mod tests {
         assert!(sql_str.contains("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json)"));
         assert!(sql_str.contains("SELECT json_build_object("));
         assert!(sql_str.contains("'id', personal.id"));
-        assert!(sql_str.contains("'full_name', CONCAT(last_name_latin, ' ', first_name_latin)"));
+        assert!(sql_str.contains("'full_name', CONCAT(personal.last_name_latin, ' ', personal.first_name_latin)"));
         assert!(sql_str.contains("INNER JOIN org ON personal.org_id = org.id"));
         assert!(result.params.as_ref().unwrap().len() > 0);
         

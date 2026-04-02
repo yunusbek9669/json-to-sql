@@ -126,20 +126,32 @@ impl SqlGenerator {
             if parent_table.is_none() {
                 self.froms.push(format!("{} AS {}", source.table_name, table_alias));
             } else {
+                let p_table = parent_table.unwrap();
+                let c_table = &source.table_name;
+                
+                let key_dir = format!("{}->{}", p_table, c_table);
+                let key_bi1 = format!("{}<->{}", p_table, c_table);
+                let key_bi2 = format!("{}<->{}", c_table, p_table);
+
                 let j_str = if let Some(j) = &node.join {
                     Some(j.clone())
+                } else if let Some(r) = self.relations.get(&key_dir) {
+                    Some(r.clone())
+                } else if let Some(r) = self.relations.get(&key_bi1) {
+                    Some(r.replace("@table", c_table))
+                } else if let Some(r) = self.relations.get(&key_bi2) {
+                    Some(r.replace("@table", c_table))
                 } else {
-                    let key = format!("{}->{}", parent_table.unwrap(), source.table_name);
-                    self.relations.get(&key).cloned()
+                    None
                 };
 
                 if let Some(j) = j_str {
                     if !j.to_uppercase().contains("JOIN") {
-                        return Err(format!("Invalid JOIN syntax inside relation map for {}->{}", parent_table.unwrap(), source.table_name));
+                        return Err(format!("Invalid JOIN syntax inside relation map for {}->{}", p_table, c_table));
                     }
                     self.joins.push(j);
                 } else {
-                    return Err(format!("No @join provided and no relation defined for {}->{}", parent_table.unwrap(), source.table_name));
+                    return Err(format!("No @join provided and no relation defined for {}->{}", p_table, c_table));
                 }
             }
             
@@ -156,21 +168,7 @@ impl SqlGenerator {
         // Fields
         for (field_key, field_sql) in &node.fields {
             self.guard.validate_field(&table_alias, field_sql)?;
-            
-            let processed_field = if field_sql.contains('(') {
-                field_sql.clone()
-            } else if field_sql.to_uppercase().trim().starts_with("CASE ") {
-                field_sql.clone()
-            } else if field_sql.starts_with('\'') && field_sql.ends_with('\'') {
-                field_sql.clone()
-            } else if field_sql.parse::<f64>().is_ok() {
-                field_sql.clone()
-            } else if field_sql.contains('.') {
-                field_sql.clone()
-            } else {
-                format!("{}.{}", table_alias, field_sql)
-            };
-            
+            let processed_field = Guard::auto_prefix_field(field_sql, &table_alias);
             json_object_args.push(format!("'{}', {}", field_key, processed_field));
             
             // Still populate structure for backwards compatibility / metadata if needed
