@@ -213,9 +213,9 @@ mod tests {
         wl.insert("employee:emp".to_string(), vec!["id".to_string(), "last_name".to_string(), "first_name".to_string(), "status".to_string(), "organization_id".to_string()]);
         wl.insert("structure_organization:org".to_string(), vec!["*".to_string()]);
 
-        // Relations use real table names
+        // Relations use ALIAS names in keys
         let mut rels = std::collections::HashMap::new();
-        rels.insert("employee<->structure_organization".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
+        rels.insert("emp<->org".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
 
         let root = parser::parse_json(json_input).expect("Should parse alias format");
         let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));

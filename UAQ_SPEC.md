@@ -152,31 +152,33 @@ Backend Controller tarafidan beriladi. Mijoz qaysi jadvalning qaysi ustunlarini 
 ### 3.2. Relations Input (3rd Parameter — Auto-Join)
 Jadvallarning o'zaro qanday JOIN bo'lishini aniqlaydi. Frontend `@join` yozishi shart emas — Engine avtomatik aniqlaydi.
 
-**Placeholder lar:**
+**Muhim:** Relation kalitlarida **alias** nomlar ishlatiladi (whitelist da berilgan). `@1`, `@2`, `@table` esa SQL da **haqiqiy** jadval nomlariga almashtiriladi.
 
-| Placeholder | Ma'nosi                             |
-|-------------|-------------------------------------|
-| `@1`        | Kalit ichidagi birinchi jadval nomi |
-| `@2`        | Kalit ichidagi ikkinchi jadval nomi |
-| `@table`    | Child (ulanuvchi) jadval nomi       |
+| Placeholder | Ma'nosi                                    |
+|-------------|--------------------------------------------|
+| `@1`        | Kalit ichidagi birinchi nom (alias)        |
+| `@2`        | Kalit ichidagi ikkinchi nom (alias)        |
+| `@table`    | Child (ulanuvchi) jadvalning haqiqiy nomi  |
 
-**Yo'nalishli format (`->`):**
+**Oddiy misol:**
 ```json
 {
-  "employee->employee_rel_organization": "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1"
+  "emp_rel_org<->emp": "INNER JOIN @table ON @1.employee_id = @2.id AND @1.current_organization = 1",
+  "emp_rel_org<->org": "INNER JOIN @table ON @1.organization_id = @2.id"
 }
 ```
 
-**Universal format (`<->`):**
-Ikki yo'nalishda (A→B va B→A) ishlaydi. `@1` va `@2` kalitdagi tartibga mos keladi:
+**Self-referencing (bitta jadval — ikki alias):**
+Whitelist: `"structure_organization:org"`, `"structure_organization:inner_org"`
 ```json
 {
-  "employee_rel_organization<->employee": "INNER JOIN @table ON @1.employee_id = @2.id AND @1.current_organization = 1",
-  "employee_rel_organization<->structure_organization": "INNER JOIN @table ON @1.organization_id = @2.id"
+  "emp_rel_org<->org": "INNER JOIN @table ON @1.organization_id = @2.id",
+  "emp_rel_org<->inner_org": "INNER JOIN @table ON @1.inner_organization_id = @2.id"
 }
 ```
+Frontend: `"@source": "org[...]"` va `"@source": "inner_org[...]"` — ikkalasi ham `structure_organization` ga resolve bo'ladi, lekin turli JOIN bilan.
 
-**Ustunlik tartibi:** `@join` (qo'lda) → `->` (yo'nalishli) → `<->` (universal)
+**Ustunlik tartibi:** `@join` (qo'lda) → `->:node_name` (aniq) → `->` / `<->` (umumiy)
 
 ---
 
