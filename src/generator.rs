@@ -56,10 +56,12 @@ impl SqlGenerator {
         
         // Order, limit, offset from root node's @source
         if let Some(source) = &root.source {
-            let root_table = self.guard.resolve_alias(&source.table_name)?;
+            // Validate alias resolves, but use alias for column prefix
+            let _root_real = self.guard.resolve_alias(&source.table_name)?;
+            let root_alias = &source.table_name;
             if let Some(order) = &source.order {
                 if self.guard.is_safe_order_by(order).is_ok() {
-                    let prefixed_order = Guard::auto_prefix_field(order, &root_table);
+                    let prefixed_order = Guard::auto_prefix_field(order, root_alias);
                     base_sql.push_str("\nORDER BY ");
                     base_sql.push_str(&prefixed_order);
                 }
@@ -105,7 +107,7 @@ impl SqlGenerator {
             
             // If parent_table is None, this is a root node -> FROM
             if parent_table.is_none() {
-                self.froms.push(format!("{} AS {}", real_table, real_table));
+                self.froms.push(format!("{} AS {}", real_table, source_name));
             } else if !node.is_list {
                 // Normal scalar child -> regular JOIN
                 let (p_alias, p_real) = parent_table.unwrap();
@@ -130,7 +132,7 @@ impl SqlGenerator {
             // Process Filters (only for non-list or root nodes)
             if !node.is_list {
                 for filter in &source.filters {
-                    let condition = self.build_condition(&real_table, filter)?;
+                    let condition = self.build_condition(&source_name, filter)?;
                     self.wheres.push(condition);
                 }
             }
@@ -142,7 +144,7 @@ impl SqlGenerator {
         // Fields
         for (field_key, field_sql) in &node.fields {
             self.guard.validate_field(&real_table, field_sql)?;
-            let processed_field = Guard::auto_prefix_field(field_sql, &real_table);
+            let processed_field = Guard::auto_prefix_field(field_sql, &source_name);
             json_object_args.push(format!("'{}', {}", field_key, processed_field));
             
             structure.insert(field_key.to_string(), json!(processed_field));
@@ -202,7 +204,7 @@ impl SqlGenerator {
         
         for (field_key, field_sql) in &node.fields {
             self.guard.validate_field(&real_table, field_sql)?;
-            let processed = Guard::auto_prefix_field(field_sql, &real_table);
+            let processed = Guard::auto_prefix_field(field_sql, child_alias);
             inner_args.push(format!("'{}', {}", field_key, processed));
             inner_structure.insert(field_key.to_string(), json!(processed));
         }
@@ -230,15 +232,15 @@ impl SqlGenerator {
         // Build WHERE clause
         let mut where_parts = vec![join_condition];
         for filter in &source.filters {
-            let cond = self.build_condition(&real_table, filter)?;
+            let cond = self.build_condition(child_alias, filter)?;
             where_parts.push(cond);
         }
         where_parts.extend(inner_wheres);
         
         // Build inner SELECT (rows with ORDER BY / LIMIT)
         let mut inner_sql = format!(
-            "SELECT {} AS item\n    FROM {}",
-            json_obj, real_table
+            "SELECT {} AS item\n    FROM {} AS {}",
+            json_obj, real_table, child_alias
         );
         
         // Add inner joins
@@ -250,7 +252,7 @@ impl SqlGenerator {
         
         if let Some(order) = &source.order {
             if self.guard.is_safe_order_by(order).is_ok() {
-                let prefixed_order = Guard::auto_prefix_field(order, &real_table);
+                let prefixed_order = Guard::auto_prefix_field(order, child_alias);
                 inner_sql.push_str(&format!("\n    ORDER BY {}", prefixed_order));
             }
         }
@@ -308,13 +310,13 @@ impl SqlGenerator {
                 }
                 
                 for filter in &source.filters {
-                    let cond = self.build_condition(&child_real, filter)?;
+                    let cond = self.build_condition(child_alias_name, filter)?;
                     wheres.push(cond);
                 }
                 
                 for (fk, fv) in &child.fields {
                     self.guard.validate_field(&child_real, fv)?;
-                    let processed = Guard::auto_prefix_field(fv, &child_real);
+                    let processed = Guard::auto_prefix_field(fv, child_alias_name);
                     
                     if child.flatten {
                         args.push(format!("'{}', {}", fk, processed));
@@ -405,7 +407,7 @@ impl SqlGenerator {
     fn resolve_relation(
         &self,
         parent_alias: &str, child_alias: &str,
-        parent_real: &str, child_real: &str,
+        _parent_real: &str, child_real: &str,
         node_name: &str,
     ) -> Result<Option<String>, String> {
         // Specific keys (with :node_name suffix)
@@ -431,16 +433,23 @@ impl SqlGenerator {
                 // Validate: template must use @1, @2, @table — not raw alias names
                 let (t1, t2) = if reversed { (child_alias, parent_alias) } else { (parent_alias, child_alias) };
                 Self::validate_relation_template(r, t1, t2, key)?;
-                // Replace with REAL table names for SQL
-                let resolved = if reversed {
-                    r.replace("@1", child_real)
-                     .replace("@2", parent_real)
-                     .replace("@table", child_real)
+                // Replace: @table → "real AS alias", @1/@2 → alias (SQL alias)
+                let (a1, a2) = if reversed {
+                    (child_alias, parent_alias)
                 } else {
-                    r.replace("@1", parent_real)
-                     .replace("@2", child_real)
-                     .replace("@table", child_real)
+                    (parent_alias, child_alias)
                 };
+                let child_a = if reversed { child_alias } else { child_alias };
+                let child_r = if reversed { child_real } else { child_real };
+                let table_expr = if child_r == child_a {
+                    child_r.to_string() // No alias needed (no whitelist alias)
+                } else {
+                    format!("{} AS {}", child_r, child_a)
+                };
+                let resolved = r
+                    .replace("@table", &table_expr)
+                    .replace("@1", a1)
+                    .replace("@2", a2);
                 return Ok(Some(resolved));
             }
         }

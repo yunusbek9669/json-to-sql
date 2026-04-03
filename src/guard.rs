@@ -104,6 +104,8 @@ impl Guard {
     pub fn validate_column(&self, table: &str, field: &str) -> Result<(), String> {
         Self::check_global_threats(field)?;
         
+        // Resolve alias to real table for whitelist lookup
+        let real_table = self.alias_map.get(table).map(|s| s.as_str()).unwrap_or(table);
         let re = Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap();
         if !re.is_match(field) {
             return Err(format!("Invalid identifier format: {}", field));
@@ -117,9 +119,9 @@ impl Guard {
         };
 
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(table) {
+            if let Some(allowed) = wl.get(real_table) {
                 if !allowed.contains(&"*".to_string()) && !allowed.contains(&raw_field.to_string()) {
-                    return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, table));
+                    return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, real_table));
                 }
             } else {
                 return Err(format!("Table '{}' is missing from whitelist context", table));
@@ -130,6 +132,8 @@ impl Guard {
 
     pub fn validate_field(&self, table: &str, field: &str) -> Result<(), String> {
         Self::check_global_threats(field)?;
+        // Resolve alias to real table for whitelist lookup
+        let real_table = self.alias_map.get(table).map(|s| s.as_str()).unwrap_or(table);
         let field_upper = field.trim().to_uppercase();
         
         let builtins = vec![
@@ -144,7 +148,7 @@ impl Guard {
 
         // Ensure identifiers inside the expression exist in the whitelist
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(table) {
+            if let Some(allowed) = wl.get(real_table) {
                 if !allowed.contains(&"*".to_string()) {
                     let re_str = Regex::new(r"'[^']*'").unwrap();
                     let field_no_str = re_str.replace_all(field, "");

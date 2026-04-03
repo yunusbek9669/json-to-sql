@@ -222,10 +222,10 @@ mod tests {
         let result = gen_inst.generate(root).expect("Should generate with aliases");
 
         let sql_str = result.sql.as_ref().unwrap();
-        // SQL must use REAL table names, not aliases
-        assert!(sql_str.contains("FROM employee AS employee"), "Should use real table name 'employee'");
-        assert!(sql_str.contains("INNER JOIN structure_organization ON employee.organization_id = structure_organization.id"), "Should resolve alias to real join");
-        assert!(sql_str.contains("'id', employee.id"), "Auto-prefix should use real table name");
+        // SQL uses REAL table in FROM/JOIN, alias as SQL alias
+        assert!(sql_str.contains("FROM employee AS emp"), "Should use FROM real AS alias");
+        assert!(sql_str.contains("INNER JOIN structure_organization AS org ON emp.organization_id = org.id"), "Should resolve alias to real join with AS alias");
+        assert!(sql_str.contains("'id', emp.id"), "Auto-prefix should use alias");
         assert!(sql_str.contains("LIMIT 5"));
 
         println!("Alias SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
