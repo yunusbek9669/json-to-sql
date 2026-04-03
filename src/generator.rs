@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::{json, Value};
 use crate::models::{FilterRule, ParseResult, QueryNode};
 use crate::guard::Guard;
@@ -13,6 +13,8 @@ pub struct SqlGenerator {
     wheres: Vec<String>,
     guard: Guard,
     relations: HashMap<String, String>,
+    /// Track already-joined aliases to avoid duplicates in auto-path resolution
+    joined_aliases: HashSet<String>,
 }
 
 impl SqlGenerator {
@@ -25,6 +27,7 @@ impl SqlGenerator {
             wheres: Vec::new(),
             guard: Guard::new(whitelist),
             relations: relations.unwrap_or_default(),
+            joined_aliases: HashSet::new(),
         }
     }
 
@@ -108,23 +111,33 @@ impl SqlGenerator {
             // If parent_table is None, this is a root node -> FROM
             if parent_table.is_none() {
                 self.froms.push(format!("{} AS {}", real_table, source_name));
+                self.joined_aliases.insert(source_name.clone());
             } else if !node.is_list {
                 // Normal scalar child -> regular JOIN
-                let (p_alias, p_real) = parent_table.unwrap();
+                // Skip if already joined (e.g., by auto-path resolution)
+                if !self.joined_aliases.contains(&source_name) {
+                    let (p_alias, p_real) = parent_table.unwrap();
 
-                let j_str = if let Some(j) = &node.join {
-                    Some(j.clone())
-                } else {
-                    self.resolve_relation(p_alias, &source_name, p_real, &real_table, &node.name)?
-                };
+                    let j_str = if let Some(j) = &node.join {
+                        Some(j.clone())
+                    } else {
+                        self.resolve_relation(p_alias, &source_name, p_real, &real_table, &node.name)?
+                    };
 
-                if let Some(j) = j_str {
-                    if !j.to_uppercase().contains("JOIN") {
-                        return Err(format!("Invalid JOIN syntax for {}->{}", p_alias, &source_name));
+                    if let Some(j) = j_str {
+                        if !j.to_uppercase().contains("JOIN") {
+                            return Err(format!("Invalid JOIN syntax for {}->{}", p_alias, &source_name));
+                        }
+                        self.joins.push(j);
+                        self.joined_aliases.insert(source_name.clone());
+                    } else {
+                        // No direct relation — try auto-path resolution via BFS
+                        if let Some(path) = self.find_relation_path(p_alias, &source_name) {
+                            self.auto_join_path(&path)?;
+                        } else {
+                            return Err(format!("No @join provided and no relation path found for {}->{}", p_alias, &source_name));
+                        }
                     }
-                    self.joins.push(j);
-                } else {
-                    return Err(format!("No @join provided and no relation defined for {}->{}", p_alias, &source_name));
                 }
             }
             // is_list nodes are handled separately below (LATERAL subquery)
@@ -457,7 +470,105 @@ impl SqlGenerator {
         Ok(None)
     }
 
-    /// Checks that a relation template does NOT contain raw table names.
+    /// Builds an adjacency graph from relation keys for path discovery.
+    /// Parses keys like "a->b", "a<->b", "a->b:name" into edges.
+    fn build_relation_graph(&self) -> HashMap<String, Vec<String>> {
+        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+
+        for key in self.relations.keys() {
+            let is_bidi = key.contains("<->");
+            let parts: Vec<&str> = if is_bidi {
+                key.splitn(2, "<->").collect()
+            } else {
+                key.splitn(2, "->").collect()
+            };
+
+            if parts.len() != 2 { continue; }
+
+            let left = parts[0].trim();
+            // Strip :node_name suffix from right side
+            let right_raw = parts[1].trim();
+            let right = right_raw.split(':').next().unwrap_or(right_raw);
+
+            graph.entry(left.to_string()).or_default().push(right.to_string());
+            if is_bidi {
+                graph.entry(right.to_string()).or_default().push(left.to_string());
+            }
+        }
+
+        // Deduplicate neighbors
+        for neighbors in graph.values_mut() {
+            neighbors.sort();
+            neighbors.dedup();
+        }
+
+        graph
+    }
+
+    /// BFS to find shortest path from `from` to `to` through the relation graph.
+    /// Returns the path as a list of alias names (including from and to).
+    fn find_relation_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        let graph = self.build_relation_graph();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+
+        visited.insert(from.to_string());
+        queue.push_back((from.to_string(), vec![from.to_string()]));
+
+        while let Some((current, path)) = queue.pop_front() {
+            if current == to {
+                return Some(path);
+            }
+
+            if let Some(neighbors) = graph.get(&current) {
+                for next in neighbors {
+                    if !visited.contains(next) {
+                        visited.insert(next.clone());
+                        let mut new_path = path.clone();
+                        new_path.push(next.clone());
+                        queue.push_back((next.clone(), new_path));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Auto-join all intermediate tables along a discovered path.
+    /// Returns the JOINs for all steps from path[0] to path[last].
+    fn auto_join_path(&mut self, path: &[String]) -> Result<(), String> {
+        for i in 0..path.len() - 1 {
+            let step_from = &path[i];
+            let step_to = &path[i + 1];
+
+            // Skip if this intermediate table is already joined
+            if i > 0 && self.joined_aliases.contains(step_from) {
+                // Already joined, check next step
+            }
+            if self.joined_aliases.contains(step_to) {
+                continue; // Target already joined
+            }
+
+            let from_real = self.guard.resolve_alias(step_from)?;
+            let to_real = self.guard.resolve_alias(step_to)?;
+            self.guard.validate_table(&to_real)?;
+
+            let join = self.resolve_relation(step_from, step_to, &from_real, &to_real, step_to)?;
+
+            if let Some(j) = join {
+                if !j.to_uppercase().contains("JOIN") {
+                    return Err(format!("Invalid JOIN syntax in path {}->{}", step_from, step_to));
+                }
+                self.joins.push(j);
+                self.joined_aliases.insert(step_to.clone());
+            } else {
+                return Err(format!("No relation template for path step {}->{}", step_from, step_to));
+            }
+        }
+
+        Ok(())
+    }
     /// Only @1, @2, @table placeholders are allowed.
     fn validate_relation_template(template: &str, table1: &str, table2: &str, key: &str) -> Result<(), String> {
         // Remove all valid placeholders first, then check for raw names

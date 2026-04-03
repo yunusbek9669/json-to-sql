@@ -251,4 +251,51 @@ mod tests {
         assert!(err.contains("is strictly prohibited by whitelist"), "Error should match whitelist format: {}", err);
         println!("Enforcement error (expected): {}", err);
     }
+
+    #[test]
+    fn test_auto_path_resolution() {
+        // Frontend writes org/inner_org directly under emp — no nested structure needed!
+        let json_input = r#"{
+            "@source": "emp[status: 1, $limit: 2]",
+            "@fields": {
+                "id": "id",
+                "full_name": "CONCAT(last_name, ' ', first_name)"
+            },
+            "viloyat_boshqarma": {
+                "@source": "org[status: 1]",
+                "@fields": { "name": "name_uz" }
+            },
+            "tuman_boshqarma": {
+                "@source": "inner_org[status: 1]",
+                "@fields": { "name": "name_uz" }
+            }
+        }"#;
+
+        let mut wl = std::collections::HashMap::new();
+        wl.insert("employee:emp".to_string(), vec!["*".to_string()]);
+        wl.insert("employee_department_staff_position:dept".to_string(), vec!["*".to_string()]);
+        wl.insert("shtat_department_basic:dept_basic".to_string(), vec!["*".to_string()]);
+        wl.insert("structure_organization:org".to_string(), vec!["*".to_string()]);
+        wl.insert("structure_organization:inner_org".to_string(), vec!["*".to_string()]);
+
+        let mut rels = std::collections::HashMap::new();
+        rels.insert("emp->dept".to_string(), "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1".to_string());
+        rels.insert("dept->dept_basic".to_string(), "INNER JOIN @table ON @1.department_basic_id = @2.id".to_string());
+        rels.insert("dept_basic<->org".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
+        rels.insert("dept_basic<->inner_org".to_string(), "INNER JOIN @table ON @1.command_organization_id = @2.id".to_string());
+
+        let root = parser::parse_json(json_input).expect("Should parse");
+        let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));
+        let result = gen_inst.generate(root).expect("Auto-path should work");
+
+        let sql_str = result.sql.as_ref().unwrap();
+        // Engine should auto-discover path: emp → dept → dept_basic → org/inner_org
+        assert!(sql_str.contains("FROM employee AS emp"), "Root table");
+        assert!(sql_str.contains("INNER JOIN employee_department_staff_position AS dept"), "Auto-joined intermediate: dept");
+        assert!(sql_str.contains("INNER JOIN shtat_department_basic AS dept_basic"), "Auto-joined intermediate: dept_basic");
+        assert!(sql_str.contains("INNER JOIN structure_organization AS org"), "Target: org");
+        assert!(sql_str.contains("INNER JOIN structure_organization AS inner_org"), "Target: inner_org");
+
+        println!("Auto-Path SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
+    }
 }

@@ -178,7 +178,38 @@ Whitelist: `"structure_organization:org"`, `"structure_organization:inner_org"`
 ```
 Frontend: `"@source": "org[...]"` va `"@source": "inner_org[...]"` — ikkalasi ham `structure_organization` ga resolve bo'ladi, lekin turli JOIN bilan.
 
-**Ustunlik tartibi:** `@join` (qo'lda) → `->:node_name` (aniq) → `->` / `<->` (umumiy)
+**Ustunlik tartibi:** `@join` (qo'lda) → `->:node_name` (aniq) → `->` / `<->` (umumiy) → **Auto-Path** (BFS)
+
+### 3.3. Auto-Path Resolution (Avtomatik Yo'l Topish)
+Agar frontend so'ragan jadval parent bilan **to'g'ridan-to'g'ri** bog'lanmagan bo'lsa, Engine relations xaritasidan **grafik** quradi va **BFS** (kenglik bo'yicha qidiruv) orqali eng qisqa yo'lni topadi.
+
+**Misol:** `emp → org` to'g'ridan-to'g'ri relation yo'q, lekin:
+- `emp → dept` ✅
+- `dept → dept_basic` ✅
+- `dept_basic <-> org` ✅
+
+Engine avtomatik `emp → dept → dept_basic → org` yo'lini topadi va barcha oraliq jadvallarni JOIN qiladi.
+
+**Frontend (sodda, tekis tuzilma):**
+```json
+{
+  "@source": "emp[status: 1]",
+  "@fields": { "id": "id" },
+  "viloyat": { "@source": "org[status: 1]", "@fields": { "name": "name_uz" } },
+  "tuman":   { "@source": "inner_org[status: 1]", "@fields": { "name": "name_uz" } }
+}
+```
+
+**Engine generatsiya qilgan SQL:**
+```sql
+FROM employee AS emp
+INNER JOIN employee_department_staff_position AS dept ON emp.id = dept.employee_id AND dept.status = 1
+INNER JOIN shtat_department_basic AS dept_basic ON dept.department_basic_id = dept_basic.id
+INNER JOIN structure_organization AS org ON dept_basic.organization_id = org.id
+INNER JOIN structure_organization AS inner_org ON dept_basic.command_organization_id = inner_org.id
+```
+
+*Eslatma: Takroriy oraliq jadvallar avtomatik o'tkazib yuboriladi. Masalan, `dept` va `dept_basic` faqat bir marta join qilinadi.*
 
 ---
 
