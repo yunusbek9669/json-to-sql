@@ -142,8 +142,8 @@ mod tests {
         assert_eq!(root.source.as_ref().unwrap().order.as_deref(), Some("personal.id DESC"));
         
         let mut rels = std::collections::HashMap::new();
-        rels.insert("personal->org".to_string(), "INNER JOIN org ON personal.org_id = org.id".to_string());
-        rels.insert("personal->pos".to_string(), "LEFT JOIN pos ON personal.pos_id = pos.id".to_string());
+        rels.insert("personal<->org".to_string(), "INNER JOIN @table ON @1.org_id = @2.id".to_string());
+        rels.insert("personal<->pos".to_string(), "LEFT JOIN @table ON @1.pos_id = @2.id".to_string());
         let gen_inst = generator::SqlGenerator::new(None, Some(rels));
         let result = gen_inst.generate(root).expect("Should generate");
 

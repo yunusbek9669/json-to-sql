@@ -149,19 +149,27 @@ Backend Controller tarafidan beriladi. Mijoz qaysi jadvalning qaysi ustunlarini 
 ### 3.2. Relations Input (3rd Parameter — Auto-Join)
 Jadvallarning o'zaro qanday JOIN bo'lishini aniqlaydi. Frontend `@join` yozishi shart emas — Engine avtomatik aniqlaydi.
 
+**Placeholder lar:**
+
+| Placeholder | Ma'nosi                             |
+|-------------|-------------------------------------|
+| `@1`        | Kalit ichidagi birinchi jadval nomi |
+| `@2`        | Kalit ichidagi ikkinchi jadval nomi |
+| `@table`    | Child (ulanuvchi) jadval nomi       |
+
 **Yo'nalishli format (`->`):**
 ```json
 {
-  "employee->employee_rel_organization": "INNER JOIN employee_rel_organization ON employee.id = employee_rel_organization.employee_id AND employee_rel_organization.status = 1"
+  "employee->employee_rel_organization": "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1"
 }
 ```
 
-**Universal format (`<->` + `@table` makrosi):**
-Ikki yo'nalishda (A→B va B→A) ishlaydi. `@table` o'rniga Engine avtomatik child jadval nomini qo'yadi:
+**Universal format (`<->`):**
+Ikki yo'nalishda (A→B va B→A) ishlaydi. `@1` va `@2` kalitdagi tartibga mos keladi:
 ```json
 {
-  "employee<->employee_rel_organization": "INNER JOIN @table ON employee.id = employee_rel_organization.employee_id",
-  "employee_rel_organization<->structure_organization": "INNER JOIN @table ON employee_rel_organization.organization_id = structure_organization.id"
+  "employee_rel_organization<->employee": "INNER JOIN @table ON @1.employee_id = @2.id AND @1.current_organization = 1",
+  "employee_rel_organization<->structure_organization": "INNER JOIN @table ON @1.organization_id = @2.id"
 }
 ```
 

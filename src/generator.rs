@@ -108,21 +108,11 @@ impl SqlGenerator {
                 // Normal scalar child -> regular JOIN
                 let p_table = parent_table.unwrap();
                 let c_table = &source.table_name;
-                
-                let key_dir = format!("{}->{}", p_table, c_table);
-                let key_bi1 = format!("{}<->{}", p_table, c_table);
-                let key_bi2 = format!("{}<->{}", c_table, p_table);
 
                 let j_str = if let Some(j) = &node.join {
                     Some(j.clone())
-                } else if let Some(r) = self.relations.get(&key_dir) {
-                    Some(r.clone())
-                } else if let Some(r) = self.relations.get(&key_bi1) {
-                    Some(r.replace("@table", c_table))
-                } else if let Some(r) = self.relations.get(&key_bi2) {
-                    Some(r.replace("@table", c_table))
                 } else {
-                    None
+                    self.resolve_relation(p_table, c_table)?
                 };
 
                 if let Some(j) = j_str {
@@ -226,23 +216,15 @@ impl SqlGenerator {
         
         // Build the JOIN between parent and this list node
         let c_table = &source.table_name;
-        let key_dir = format!("{}->{}", parent_table, c_table);
-        let key_bi1 = format!("{}<->{}", parent_table, c_table);
-        let key_bi2 = format!("{}<->{}", c_table, parent_table);
 
         let join_condition = if let Some(j) = &node.join {
-            // Extract ON condition from JOIN string
             extract_on_condition(j)?
-        } else if let Some(r) = self.relations.get(&key_dir) {
-            extract_on_condition(r)?
-        } else if let Some(r) = self.relations.get(&key_bi1) {
-            let replaced = r.replace("@table", c_table);
-            extract_on_condition(&replaced)?
-        } else if let Some(r) = self.relations.get(&key_bi2) {
-            let replaced = r.replace("@table", c_table);
-            extract_on_condition(&replaced)?
         } else {
-            return Err(format!("No relation defined for list {}->{}", parent_table, c_table));
+            let resolved = self.resolve_relation(parent_table, c_table)?;
+            match resolved {
+                Some(r) => extract_on_condition(&r)?,
+                None => return Err(format!("No relation defined for list {}->{}", parent_table, c_table)),
+            }
         };
         
         // Build WHERE clause
@@ -310,21 +292,11 @@ impl SqlGenerator {
                     _parent_table
                 };
                 
-                // Find join for this child
-                let key_dir = format!("{}->{}", parent_of_child, child_table);
-                let key_bi1 = format!("{}<->{}", parent_of_child, child_table);
-                let key_bi2 = format!("{}<->{}", child_table, parent_of_child);
 
                 let j_str = if let Some(j) = &child.join {
                     Some(j.clone())
-                } else if let Some(r) = self.relations.get(&key_dir) {
-                    Some(r.clone())
-                } else if let Some(r) = self.relations.get(&key_bi1) {
-                    Some(r.replace("@table", child_table))
-                } else if let Some(r) = self.relations.get(&key_bi2) {
-                    Some(r.replace("@table", child_table))
                 } else {
-                    None
+                    self.resolve_relation(parent_of_child, child_table)?
                 };
                 
                 if let Some(j) = j_str {
@@ -422,6 +394,80 @@ impl SqlGenerator {
         let param_placeholder = format!(":{}", param_name);
         self.params.insert(param_name, val);
         param_placeholder
+    }
+
+    /// Resolves a relation template from the relations map.
+    /// Supports `->` (directional), `<->` (bi-directional) keys.
+    /// Replaces `@1`, `@2` (key order), and `@table` (child) placeholders.
+    /// Raw table names in template are FORBIDDEN — only @1, @2, @table allowed.
+    fn resolve_relation(&self, parent: &str, child: &str) -> Result<Option<String>, String> {
+        let key_dir = format!("{}->{}", parent, child);
+        let key_bi1 = format!("{}<->{}", parent, child);
+        let key_bi2 = format!("{}<->{}", child, parent);
+
+        if let Some(r) = self.relations.get(&key_dir) {
+            Self::validate_relation_template(r, parent, child, &key_dir)?;
+            let resolved = r
+                .replace("@1", parent)
+                .replace("@2", child)
+                .replace("@table", child);
+            Ok(Some(resolved))
+        } else if let Some(r) = self.relations.get(&key_bi1) {
+            Self::validate_relation_template(r, parent, child, &key_bi1)?;
+            let resolved = r
+                .replace("@1", parent)
+                .replace("@2", child)
+                .replace("@table", child);
+            Ok(Some(resolved))
+        } else if let Some(r) = self.relations.get(&key_bi2) {
+            Self::validate_relation_template(r, child, parent, &key_bi2)?;
+            let resolved = r
+                .replace("@1", child)
+                .replace("@2", parent)
+                .replace("@table", child);
+            Ok(Some(resolved))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Checks that a relation template does NOT contain raw table names.
+    /// Only @1, @2, @table placeholders are allowed.
+    fn validate_relation_template(template: &str, table1: &str, table2: &str, key: &str) -> Result<(), String> {
+        // Remove all valid placeholders first, then check for raw names
+        let cleaned = template
+            .replace("@table", "")
+            .replace("@1", "")
+            .replace("@2", "");
+        
+        // Check if any raw table name still appears (with dot after it = column reference)
+        if cleaned.contains(&format!("{}.", table1)) {
+            return Err(format!(
+                "Relations Error [{}]: Raw table name '{}.' used directly. Use @1, @2, or @table placeholders instead.",
+                key, table1
+            ));
+        }
+        if cleaned.contains(&format!("{}.", table2)) {
+            return Err(format!(
+                "Relations Error [{}]: Raw table name '{}.' used directly. Use @1, @2, or @table placeholders instead.",
+                key, table2
+            ));
+        }
+        
+        // Also check JOIN target (after JOIN keyword, before ON)
+        let upper = template.to_uppercase();
+        if let Some(join_pos) = upper.find("JOIN ") {
+            let after_join = &template[join_pos + 5..];
+            let target = after_join.split_whitespace().next().unwrap_or("");
+            if target != "@table" && target != "@1" && target != "@2" {
+                return Err(format!(
+                    "Relations Error [{}]: Raw table name '{}' used after JOIN. Use @table, @1, or @2 placeholder instead.",
+                    key, target
+                ));
+            }
+        }
+        
+        Ok(())
     }
 }
 
