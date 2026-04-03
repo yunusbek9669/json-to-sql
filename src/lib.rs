@@ -190,4 +190,65 @@ mod tests {
         
         println!("Legacy SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
     }
+
+    #[test]
+    fn test_alias_format() {
+        // Frontend uses aliases defined in whitelist
+        let json_input = r#"{
+            "@source": "emp[status: 1, $limit: 5]",
+            "@fields": {
+                "id": "id",
+                "full_name": "CONCAT(last_name, ' ', first_name)"
+            },
+            "boshqarma": {
+                "@source": "org[status: 1]",
+                "@fields": {
+                    "name": "name_uz"
+                }
+            }
+        }"#;
+
+        // Whitelist with aliases: "real_table:alias"
+        let mut wl = std::collections::HashMap::new();
+        wl.insert("employee:emp".to_string(), vec!["id".to_string(), "last_name".to_string(), "first_name".to_string(), "status".to_string(), "organization_id".to_string()]);
+        wl.insert("structure_organization:org".to_string(), vec!["*".to_string()]);
+
+        // Relations use real table names
+        let mut rels = std::collections::HashMap::new();
+        rels.insert("employee<->structure_organization".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
+
+        let root = parser::parse_json(json_input).expect("Should parse alias format");
+        let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));
+        let result = gen_inst.generate(root).expect("Should generate with aliases");
+
+        let sql_str = result.sql.as_ref().unwrap();
+        // SQL must use REAL table names, not aliases
+        assert!(sql_str.contains("FROM employee AS employee"), "Should use real table name 'employee'");
+        assert!(sql_str.contains("INNER JOIN structure_organization ON employee.organization_id = structure_organization.id"), "Should resolve alias to real join");
+        assert!(sql_str.contains("'id', employee.id"), "Auto-prefix should use real table name");
+        assert!(sql_str.contains("LIMIT 5"));
+
+        println!("Alias SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
+    }
+
+    #[test]
+    fn test_alias_enforcement() {
+        // Frontend tries to use real table name when alias is defined → must fail
+        let json_input = r#"{
+            "@source": "employee[status: 1]",
+            "@fields": { "id": "id" }
+        }"#;
+
+        let mut wl = std::collections::HashMap::new();
+        wl.insert("employee:emp".to_string(), vec!["*".to_string()]);
+
+        let root = parser::parse_json(json_input).expect("Should parse");
+        let gen_inst = generator::SqlGenerator::new(Some(wl), None);
+        let result = gen_inst.generate(root);
+        
+        assert!(result.is_err(), "Should reject raw table name when alias exists");
+        let err = result.unwrap_err();
+        assert!(err.contains("is strictly prohibited by whitelist"), "Error should match whitelist format: {}", err);
+        println!("Enforcement error (expected): {}", err);
+    }
 }

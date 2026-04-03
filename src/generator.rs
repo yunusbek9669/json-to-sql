@@ -56,10 +56,10 @@ impl SqlGenerator {
         
         // Order, limit, offset from root node's @source
         if let Some(source) = &root.source {
-            let root_table = &source.table_name;
+            let root_table = self.guard.resolve_alias(&source.table_name)?;
             if let Some(order) = &source.order {
                 if self.guard.is_safe_order_by(order).is_ok() {
-                    let prefixed_order = Guard::auto_prefix_field(order, root_table);
+                    let prefixed_order = Guard::auto_prefix_field(order, &root_table);
                     base_sql.push_str("\nORDER BY ");
                     base_sql.push_str(&prefixed_order);
                 }
@@ -92,27 +92,29 @@ impl SqlGenerator {
     }
 
     fn process_node(&mut self, node: &QueryNode, parent_table: Option<&str>, structure: &mut serde_json::Map<String, Value>) -> Result<Vec<String>, String> {
+        // Resolve alias → real table name (e.g. "org" → "structure_organization")
         let table_alias = if let Some(source) = &node.source {
-            source.table_name.clone()
+            self.guard.resolve_alias(&source.table_name)?
         } else {
             node.name.clone()
         };
         
         if let Some(source) = &node.source {
-            self.guard.validate_table(&source.table_name)?;
+            let real_table = self.guard.resolve_alias(&source.table_name)?;
+            self.guard.validate_table(&real_table)?;
             
             // If parent_table is None, this is a root node -> FROM
             if parent_table.is_none() {
-                self.froms.push(format!("{} AS {}", source.table_name, table_alias));
+                self.froms.push(format!("{} AS {}", real_table, real_table));
             } else if !node.is_list {
                 // Normal scalar child -> regular JOIN
                 let p_table = parent_table.unwrap();
-                let c_table = &source.table_name;
+                let c_table = real_table.as_str();
 
                 let j_str = if let Some(j) = &node.join {
                     Some(j.clone())
                 } else {
-                    self.resolve_relation(p_table, c_table)?
+                    self.resolve_relation(p_table, c_table, &node.name)?
                 };
 
                 if let Some(j) = j_str {
@@ -191,8 +193,9 @@ impl SqlGenerator {
         let source = node.source.as_ref()
             .ok_or_else(|| format!("List node '{}' must have @source", node.name))?;
         
-        self.guard.validate_table(&source.table_name)?;
-        let table_alias = &source.table_name;
+        let real_table = self.guard.resolve_alias(&source.table_name)?;
+        self.guard.validate_table(&real_table)?;
+        let table_alias = &real_table;
         
         // Build the inner json_build_object fields
         let mut inner_args = Vec::new();
@@ -215,12 +218,12 @@ impl SqlGenerator {
         let json_obj = format!("json_build_object({})", inner_args.join(", "));
         
         // Build the JOIN between parent and this list node
-        let c_table = &source.table_name;
+        let c_table = table_alias.as_str();
 
         let join_condition = if let Some(j) = &node.join {
             extract_on_condition(j)?
         } else {
-            let resolved = self.resolve_relation(parent_table, c_table)?;
+            let resolved = self.resolve_relation(parent_table, c_table, &node.name)?;
             match resolved {
                 Some(r) => extract_on_condition(&r)?,
                 None => return Err(format!("No relation defined for list {}->{}", parent_table, c_table)),
@@ -238,7 +241,7 @@ impl SqlGenerator {
         // Build inner SELECT (rows with ORDER BY / LIMIT)
         let mut inner_sql = format!(
             "SELECT {} AS item\n    FROM {}",
-            json_obj, source.table_name
+            json_obj, real_table
         );
         
         // Add inner joins
@@ -284,10 +287,13 @@ impl SqlGenerator {
             let child_source = child.source.as_ref();
             
             if let Some(source) = child_source {
-                self.guard.validate_table(&source.table_name)?;
-                let child_table = &source.table_name;
+                let child_table_resolved = self.guard.resolve_alias(&source.table_name)?;
+                self.guard.validate_table(&child_table_resolved)?;
+                let child_table = child_table_resolved.as_str();
+                let parent_resolved;
                 let parent_of_child = if let Some(ns) = &node.source {
-                    &ns.table_name
+                    parent_resolved = self.guard.resolve_alias(&ns.table_name)?;
+                    parent_resolved.as_str()
                 } else {
                     _parent_table
                 };
@@ -296,7 +302,7 @@ impl SqlGenerator {
                 let j_str = if let Some(j) = &child.join {
                     Some(j.clone())
                 } else {
-                    self.resolve_relation(parent_of_child, child_table)?
+                    self.resolve_relation(parent_of_child, child_table, &child.name)?
                 };
                 
                 if let Some(j) = j_str {
@@ -398,37 +404,48 @@ impl SqlGenerator {
 
     /// Resolves a relation template from the relations map.
     /// Supports `->` (directional), `<->` (bi-directional) keys.
+    /// Supports `:node_name` suffix for disambiguating same-table relations.
+    /// Lookup priority: specific (with :name) → generic (without :name).
     /// Replaces `@1`, `@2` (key order), and `@table` (child) placeholders.
     /// Raw table names in template are FORBIDDEN — only @1, @2, @table allowed.
-    fn resolve_relation(&self, parent: &str, child: &str) -> Result<Option<String>, String> {
+    fn resolve_relation(&self, parent: &str, child: &str, node_name: &str) -> Result<Option<String>, String> {
+        // Specific keys (with :node_name suffix)
+        let spec_dir = format!("{}->{}:{}", parent, child, node_name);
+        let spec_bi1 = format!("{}<->{}:{}", parent, child, node_name);
+        let spec_bi2 = format!("{}<->{}:{}", child, parent, node_name);
+        // Generic keys
         let key_dir = format!("{}->{}", parent, child);
         let key_bi1 = format!("{}<->{}", parent, child);
         let key_bi2 = format!("{}<->{}", child, parent);
 
-        if let Some(r) = self.relations.get(&key_dir) {
-            Self::validate_relation_template(r, parent, child, &key_dir)?;
-            let resolved = r
-                .replace("@1", parent)
-                .replace("@2", child)
-                .replace("@table", child);
-            Ok(Some(resolved))
-        } else if let Some(r) = self.relations.get(&key_bi1) {
-            Self::validate_relation_template(r, parent, child, &key_bi1)?;
-            let resolved = r
-                .replace("@1", parent)
-                .replace("@2", child)
-                .replace("@table", child);
-            Ok(Some(resolved))
-        } else if let Some(r) = self.relations.get(&key_bi2) {
-            Self::validate_relation_template(r, child, parent, &key_bi2)?;
-            let resolved = r
-                .replace("@1", child)
-                .replace("@2", parent)
-                .replace("@table", child);
-            Ok(Some(resolved))
-        } else {
-            Ok(None)
+        // Try specific first, then generic
+        let candidates: Vec<(&str, bool)> = vec![
+            (&spec_dir, false),
+            (&spec_bi1, false),
+            (&spec_bi2, true),
+            (&key_dir, false),
+            (&key_bi1, false),
+            (&key_bi2, true),
+        ];
+
+        for (key, reversed) in candidates {
+            if let Some(r) = self.relations.get(key) {
+                let (t1, t2) = if reversed { (child, parent) } else { (parent, child) };
+                Self::validate_relation_template(r, t1, t2, key)?;
+                let resolved = if reversed {
+                    r.replace("@1", child)
+                     .replace("@2", parent)
+                     .replace("@table", child)
+                } else {
+                    r.replace("@1", parent)
+                     .replace("@2", child)
+                     .replace("@table", child)
+                };
+                return Ok(Some(resolved));
+            }
         }
+
+        Ok(None)
     }
 
     /// Checks that a relation template does NOT contain raw table names.

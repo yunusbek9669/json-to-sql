@@ -2,12 +2,62 @@ use regex::Regex;
 use std::collections::HashMap;
 
 pub struct Guard {
+    /// real_table -> allowed_columns
     pub whitelist: Option<HashMap<String, Vec<String>>>,
+    /// alias -> real_table (e.g. "org" -> "structure_organization")
+    pub alias_map: HashMap<String, String>,
+    /// real_table -> alias (reverse, for enforcement)
+    pub reverse_alias_map: HashMap<String, String>,
 }
 
 impl Guard {
-    pub fn new(whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
-        Self { whitelist }
+    /// Parses whitelist keys with optional alias: "real_table:alias" -> columns
+    /// Builds both whitelist (real_table -> columns) and alias_map (alias -> real_table)
+    pub fn new(raw_whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
+        let mut alias_map = HashMap::new();
+        let mut reverse_alias_map = HashMap::new();
+        
+        let whitelist = raw_whitelist.map(|raw| {
+            let mut clean = HashMap::new();
+            for (key, columns) in raw {
+                if let Some((real_table, alias)) = key.split_once(':') {
+                    let real_table = real_table.trim().to_string();
+                    let alias = alias.trim().to_string();
+                    alias_map.insert(alias.clone(), real_table.clone());
+                    reverse_alias_map.insert(real_table.clone(), alias);
+                    clean.insert(real_table, columns);
+                } else {
+                    // No alias — table name is used directly
+                    clean.insert(key, columns);
+                }
+            }
+            clean
+        });
+        
+        Self { whitelist, alias_map, reverse_alias_map }
+    }
+
+    /// Resolves an alias to a real table name.
+    /// If the input is a real table name that has an alias, returns an error
+    /// (frontend MUST use the alias, not the raw table name).
+    /// If no alias found, returns the input as-is (it might be a real table name without alias).
+    pub fn resolve_alias(&self, name: &str) -> Result<String, String> {
+        // Check if it's a valid alias
+        if let Some(real) = self.alias_map.get(name) {
+            return Ok(real.clone());
+        }
+        
+        // Check if the user used a raw table name that has an alias defined
+        // Do NOT reveal real table name — just say it's unknown
+        if self.reverse_alias_map.contains_key(name) {
+            return Err(format!(
+                "Table '{}' is strictly prohibited by whitelist",
+                name
+            ));
+        }
+        
+        // No alias exists — use the name directly
+        Ok(name.to_string())
     }
 
     pub fn check_global_threats(input: &str) -> Result<(), String> {
@@ -41,7 +91,7 @@ impl Guard {
             return Err(format!("Invalid table name format: {}", name));
         }
 
-        // Check against whitelist if active
+        // Check against whitelist if active (using real table name)
         if let Some(wl) = &self.whitelist {
             if !wl.contains_key(name) {
                 return Err(format!("Table '{}' is strictly prohibited by whitelist", name));

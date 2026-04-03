@@ -40,12 +40,12 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
 |-----------|--------------------------------|----------------------------|
 | `$limit`  | Qaytariladigan qatorlar soni   | `$limit: 50`               |
 | `$offset` | Boshlang'ich o'tkazib yuborish | `$offset: 100`             |
-| `$order`  | Tartiblash                     | `$order: employee.id DESC` |
+| `$order`  | Tartiblash                     | `$order: id DESC` |
 
 ### Oddiy so'rov namunasi:
 ```json
 {
-  "@source": "employee[status: 1, $limit: 10, $order: id DESC]",
+  "@source": "emp[status: 1, $limit: 10, $order: id DESC]",
   "@fields": {
     "id": "id",
     "full_name": "CONCAT(last_name, ' ', first_name)"
@@ -56,7 +56,7 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
 ### Murakkab so'rov namunasi (JOIN + Flatten + List):
 ```json
 {
-  "@source": "employee[status: 1, id: 1..45, $limit: 2, $order: employee.id DESC]",
+  "@source": "emp[status: 1, id: 1..45, $limit: 2, $order: id DESC]",
   "@fields": {
     "id": "id",
     "full_name": "CONCAT(last_name, ' ', first_name)",
@@ -64,12 +64,12 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
     "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
   },
   "boshqarma": {
-    "@source": "employee_rel_organization[status: 1]",
+    "@source": "emp_rel_org[status: 1]",
     "@fields": {
       "begin_date": "TO_CHAR(TO_TIMESTAMP(created_at), 'DD.MM.YYYY')"
     },
     "0": {
-      "@source": "structure_organization[status: 1]",
+      "@source": "org[status: 1]",
       "@flatten": true,
       "@fields": {
         "name": "name_uz"
@@ -77,7 +77,7 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
     }
   },
   "positions[]": {
-    "@source": "employee_department_staff_position[current_position: 1, $limit: 5, $order: id DESC]",
+    "@source": "department_staff_position[current_position: 1, $limit: 5, $order: id DESC]",
     "@fields": {
       "id": "id",
       "begin_date": "TO_CHAR(TO_TIMESTAMP(staff_position_start_time), 'DD.MM.YYYY')"
@@ -86,7 +86,7 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
       "@source": "shtat_staff_position_basic[status: 1]",
       "@flatten": true,
       "0": {
-        "@source": "manuals_staff_position[status: 1]",
+        "@source": "staff_position[status: 1]",
         "@flatten": true,
         "@fields": {
           "name": "name_uz"
@@ -95,13 +95,13 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
     }
   },
   "degree": {
-    "@source": "employee_department_military_degree[current_degree: 1]",
+    "@source": "department_military_degree[current_degree: 1]",
     "@fields": {
       "id": "id",
       "degree_given_time": "TO_CHAR(TO_TIMESTAMP(degree_given_time), 'DD.MM.YYYY')"
     },
     "0": {
-      "@source": "manuals_military_degree[status: 1]",
+      "@source": "military_degree[status: 1]",
       "@flatten": true,
       "@fields": {
         "name": "name_uz"
@@ -133,18 +133,21 @@ Engine `uaq_parse(json_input, whitelist_input, relations_input)` funksiyasi orqa
 
 ### 3.1. Whitelist Input (2nd Parameter)
 Backend Controller tarafidan beriladi. Mijoz qaysi jadvalning qaysi ustunlarini o'qish imkoniga ega ekanligini qat'iy cheklaydi. Ro'yxatda bo'lmagan ustunlar (`password`, `token`) dan himoyalaydi.
+
+**Format:** `"real_table_name:alias"` — alias ixtiyoriy. Agar alias berilsa, frontend `@source` da faqat shu aliasni yozadi. SQL da esa haqiqiy jadval nomi ishlatiladi.
+
 ```json
 {
-  "employee": ["id", "last_name", "first_name", "jshshir", "status", "birthday", "organization_id"],
-  "employee_rel_organization": ["*"],
-  "structure_organization": ["id", "name_uz", "code"],
-  "employee_department_staff_position": ["*"],
-  "manuals_staff_position": ["id", "name_uz"],
-  "employee_department_military_degree": ["*"],
-  "manuals_military_degree": ["id", "name_uz"]
+  "employee:emp": ["id", "last_name", "first_name", "jshshir", "status", "birthday", "organization_id"],
+  "employee_rel_organization:emp_rel_org": ["*"],
+  "structure_organization:org": ["id", "name_uz", "code"],
+  "employee_department_staff_position:department_staff_position": ["*"],
+  "manuals_staff_position:staff_position": ["id", "name_uz"],
+  "employee_department_military_degree:department_military_degree": ["*"],
+  "manuals_military_degree:military_degree": ["id", "name_uz"]
 }
 ```
-*Eslatma: `["*"]` — barcha ustunlarga ruxsat.*
+*Eslatma: `["*"]` — barcha ustunlarga ruxsat. Aliassiz ham yozish mumkin: `"employee": [...]`*
 
 ### 3.2. Relations Input (3rd Parameter — Auto-Join)
 Jadvallarning o'zaro qanday JOIN bo'lishini aniqlaydi. Frontend `@join` yozishi shart emas — Engine avtomatik aniqlaydi.
