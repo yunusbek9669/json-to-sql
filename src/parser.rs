@@ -16,6 +16,8 @@ pub fn parse_source(source_str: &str) -> SourceDef {
     let mut limit = None;
     let mut offset = None;
     let mut order = None;
+    let mut join_type = None;
+    let mut rel = None;
     
     if let Some(rules_match) = caps.get(2) {
         let rules_str = rules_match.as_str().trim();
@@ -29,7 +31,7 @@ pub fn parse_source(source_str: &str) -> SourceDef {
                     let field = field.trim();
                     let rest = rest.trim();
                     
-                    // Handle $limit, $order, $offset directives
+                    // Handle $limit, $order, $offset, $join, $rel directives
                     match field {
                         "$limit" => {
                             limit = rest.parse::<u64>().ok();
@@ -39,6 +41,12 @@ pub fn parse_source(source_str: &str) -> SourceDef {
                         }
                         "$order" => {
                             order = Some(rest.to_string());
+                        }
+                        "$join" => {
+                            join_type = Some(rest.to_lowercase());
+                        }
+                        "$rel" => {
+                            rel = Some(rest.to_string());
                         }
                         _ => {
                             let (operator, value) = parse_operator_and_value(rest);
@@ -50,7 +58,7 @@ pub fn parse_source(source_str: &str) -> SourceDef {
         }
     }
     
-    SourceDef { table_name, filters, limit, offset, order }
+    SourceDef { table_name, filters, limit, offset, order, join_type, rel }
 }
 
 fn parse_operator_and_value(input: &str) -> (String, String) {
@@ -145,6 +153,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
         flatten: false,
         fields: IndexMap::new(),
         children: Vec::new(),
+        mode: None,
     };
     
     for (k, v) in map {
@@ -152,6 +161,11 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
             "@source" => {
                 if let Value::String(s) = v {
                     node.source = Some(parse_source(s));
+                }
+            }
+            "@mode" => {
+                if let Value::String(s) = v {
+                    node.mode = Some(s.to_lowercase());
                 }
             }
             "@join" => {

@@ -1,13 +1,13 @@
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Guard {
     /// real_table -> allowed_columns
     pub whitelist: Option<HashMap<String, Vec<String>>>,
     /// alias -> real_table (e.g. "org" -> "structure_organization")
     pub alias_map: HashMap<String, String>,
-    /// real_table -> alias (reverse, for enforcement)
-    pub reverse_alias_map: HashMap<String, String>,
+    /// Set of real table names that have aliases (for enforcement)
+    pub aliased_tables: HashSet<String>,
 }
 
 impl Guard {
@@ -15,41 +15,46 @@ impl Guard {
     /// Builds both whitelist (real_table -> columns) and alias_map (alias -> real_table)
     pub fn new(raw_whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
         let mut alias_map = HashMap::new();
-        let mut reverse_alias_map = HashMap::new();
+        let mut aliased_tables = HashSet::new();
         
-        let whitelist = raw_whitelist.map(|raw| {
-            let mut clean = HashMap::new();
+        let whitelist = if let Some(raw) = raw_whitelist {
+            let mut clean_whitelist = HashMap::new();
             for (key, columns) in raw {
                 if let Some((real_table, alias)) = key.split_once(':') {
                     let real_table = real_table.trim().to_string();
                     let alias = alias.trim().to_string();
                     alias_map.insert(alias.clone(), real_table.clone());
-                    reverse_alias_map.insert(real_table.clone(), alias);
-                    clean.insert(real_table, columns);
+                    aliased_tables.insert(real_table.clone());
+                    // Use alias as the key in whitelist for better security context
+                    clean_whitelist.insert(alias, columns);
                 } else {
-                    // No alias — table name is used directly
-                    clean.insert(key, columns);
+                    // No alias — table name is used directly as context
+                    clean_whitelist.insert(key, columns);
                 }
             }
-            clean
-        });
+            Some(clean_whitelist)
+        } else {
+            None
+        };
         
-        Self { whitelist, alias_map, reverse_alias_map }
+        Self { 
+            whitelist, 
+            alias_map, 
+            aliased_tables 
+        }
     }
 
     /// Resolves an alias to a real table name.
     /// If the input is a real table name that has an alias, returns an error
     /// (frontend MUST use the alias, not the raw table name).
-    /// If no alias found, returns the input as-is (it might be a real table name without alias).
     pub fn resolve_alias(&self, name: &str) -> Result<String, String> {
         // Check if it's a valid alias
         if let Some(real) = self.alias_map.get(name) {
             return Ok(real.clone());
         }
         
-        // Check if the user used a raw table name that has an alias defined
-        // Do NOT reveal real table name — just say it's unknown
-        if self.reverse_alias_map.contains_key(name) {
+        // If it's a real table name that should be aliased, block it
+        if self.aliased_tables.contains(name) {
             return Err(format!(
                 "Table '{}' is strictly prohibited by whitelist",
                 name
@@ -83,32 +88,30 @@ impl Guard {
         Ok(())
     }
 
-    pub fn validate_table(&self, name: &str) -> Result<(), String> {
-        Self::check_global_threats(name)?;
+    pub fn validate_table(&self, context: &str) -> Result<(), String> {
+        Self::check_global_threats(context)?;
         
         let re = Regex::new(r"^[a-zA-Z0-9_]+$").unwrap();
-        if !re.is_match(name) {
-            return Err(format!("Invalid table name format: {}", name));
+        if !re.is_match(context) {
+            return Err(format!("Invalid table name format: {}", context));
         }
 
-        // Check against whitelist if active (using real table name)
+        // Check against whitelist if active (using the provided alias or real table name)
         if let Some(wl) = &self.whitelist {
-            if !wl.contains_key(name) {
-                return Err(format!("Table '{}' is strictly prohibited by whitelist", name));
+            if !wl.contains_key(context) {
+                return Err(format!("Table '{}' is strictly prohibited by whitelist", context));
             }
         }
 
         Ok(())
     }
 
-    pub fn validate_column(&self, table: &str, field: &str) -> Result<(), String> {
+    pub fn validate_column(&self, context: &str, field: &str) -> Result<(), String> {
         Self::check_global_threats(field)?;
         
-        // Resolve alias to real table for whitelist lookup
-        let real_table = self.alias_map.get(table).map(|s| s.as_str()).unwrap_or(table);
         let re = Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap();
         if !re.is_match(field) {
-            return Err(format!("Invalid identifier format: {}", field));
+            return Err(format!("Invalid identifier format: {} in table {}", field, context));
         }
         
         // Strip out table prefix if present, e.g. "personal.id" -> "id"
@@ -119,21 +122,19 @@ impl Guard {
         };
 
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(real_table) {
+            if let Some(allowed) = wl.get(context) {
                 if !allowed.contains(&"*".to_string()) && !allowed.contains(&raw_field.to_string()) {
-                    return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, real_table));
+                    return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, context));
                 }
             } else {
-                return Err(format!("Table '{}' is missing from whitelist context", table));
+                return Err(format!("Table '{}' is missing from whitelist context", context));
             }
         }
         Ok(())
     }
 
-    pub fn validate_field(&self, table: &str, field: &str) -> Result<(), String> {
+    pub fn validate_field(&self, context: &str, field: &str) -> Result<(), String> {
         Self::check_global_threats(field)?;
-        // Resolve alias to real table for whitelist lookup
-        let real_table = self.alias_map.get(table).map(|s| s.as_str()).unwrap_or(table);
         let field_upper = field.trim().to_uppercase();
         
         let builtins = vec![
@@ -148,7 +149,7 @@ impl Guard {
 
         // Ensure identifiers inside the expression exist in the whitelist
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(real_table) {
+            if let Some(allowed) = wl.get(context) {
                 if !allowed.contains(&"*".to_string()) {
                     let re_str = Regex::new(r"'[^']*'").unwrap();
                     let field_no_str = re_str.replace_all(field, "");
@@ -162,12 +163,12 @@ impl Guard {
                         // Strip potential prefix to match whitelist directly
                         let clean_ident = if let Some((_, col)) = ident.split_once('.') { col } else { ident };
                         if !allowed.contains(&clean_ident.to_string()) {
-                            return Err(format!("Expression column '{}' is blocked for table '{}'", clean_ident, table));
+                            return Err(format!("Expression column '{}' is blocked for table '{}'", clean_ident, context));
                         }
                     }
                 }
             } else {
-                 return Err(format!("Table '{}' is blocked", table));
+                 return Err(format!("Table '{}' is blocked", context));
             }
         }
 
@@ -193,7 +194,7 @@ impl Guard {
             if (field.starts_with('\'') && field.ends_with('\'')) || field.parse::<f64>().is_ok() {
                 return Ok(());
             }
-            self.validate_column(table, field)?; 
+            self.validate_column(context, field)?; 
         }
         Ok(())
     }

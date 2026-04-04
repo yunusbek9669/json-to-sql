@@ -15,10 +15,14 @@ pub struct SqlGenerator {
     relations: HashMap<String, String>,
     /// Track already-joined aliases to avoid duplicates in auto-path resolution
     joined_aliases: HashSet<String>,
+    /// Cached adjacency graph built from relations (for BFS path discovery)
+    relation_graph: HashMap<String, Vec<String>>,
 }
 
 impl SqlGenerator {
     pub fn new(whitelist: Option<HashMap<String, Vec<String>>>, relations: Option<HashMap<String, String>>) -> Self {
+        let rels = relations.unwrap_or_default();
+        let relation_graph = Self::build_relation_graph(&rels);
         Self {
             param_counter: 0,
             params: IndexMap::new(),
@@ -26,8 +30,9 @@ impl SqlGenerator {
             joins: Vec::new(),
             wheres: Vec::new(),
             guard: Guard::new(whitelist),
-            relations: relations.unwrap_or_default(),
+            relations: rels,
             joined_aliases: HashSet::new(),
+            relation_graph,
         }
     }
 
@@ -106,7 +111,7 @@ impl SqlGenerator {
         };
         
         if let Some(source) = &node.source {
-            self.guard.validate_table(&real_table)?;
+            self.guard.validate_table(&source.table_name)?;
             
             // If parent_table is None, this is a root node -> FROM
             if parent_table.is_none() {
@@ -118,15 +123,22 @@ impl SqlGenerator {
                 if !self.joined_aliases.contains(&source_name) {
                     let (p_alias, p_real) = parent_table.unwrap();
 
+                    // $rel modifier: use explicit relation name for lookup
+                    let rel_name = source.rel.as_deref().unwrap_or(&node.name);
+
                     let j_str = if let Some(j) = &node.join {
                         Some(j.clone())
                     } else {
-                        self.resolve_relation(p_alias, &source_name, p_real, &real_table, &node.name)?
+                        self.resolve_relation(p_alias, &source_name, p_real, &real_table, rel_name)?
                     };
 
-                    if let Some(j) = j_str {
+                    if let Some(mut j) = j_str {
                         if !j.to_uppercase().contains("JOIN") {
                             return Err(format!("Invalid JOIN syntax for {}->{}", p_alias, &source_name));
+                        }
+                        // $join modifier: override JOIN type (e.g., "left" → "LEFT JOIN")
+                        if let Some(jt) = &source.join_type {
+                            j = Self::override_join_type(&j, jt);
                         }
                         self.joins.push(j);
                         self.joined_aliases.insert(source_name.clone());
@@ -156,7 +168,7 @@ impl SqlGenerator {
         
         // Fields
         for (field_key, field_sql) in &node.fields {
-            self.guard.validate_field(&real_table, field_sql)?;
+            self.guard.validate_field(&source_name, field_sql)?;
             let processed_field = Guard::auto_prefix_field(field_sql, &source_name);
             json_object_args.push(format!("'{}', {}", field_key, processed_field));
             
@@ -209,14 +221,14 @@ impl SqlGenerator {
         
         let child_alias = &source.table_name;
         let real_table = self.guard.resolve_alias(&source.table_name)?;
-        self.guard.validate_table(&real_table)?;
+        self.guard.validate_table(&source.table_name)?;
         
         // Build the inner json_build_object fields
         let mut inner_args = Vec::new();
         let mut inner_structure = serde_json::Map::new();
         
         for (field_key, field_sql) in &node.fields {
-            self.guard.validate_field(&real_table, field_sql)?;
+            self.guard.validate_field(child_alias, field_sql)?;
             let processed = Guard::auto_prefix_field(field_sql, child_alias);
             inner_args.push(format!("'{}', {}", field_key, processed));
             inner_structure.insert(field_key.to_string(), json!(processed));
@@ -302,7 +314,7 @@ impl SqlGenerator {
             if let Some(source) = child_source {
                 let child_alias_name = &source.table_name;
                 let child_real = self.guard.resolve_alias(&source.table_name)?;
-                self.guard.validate_table(&child_real)?;
+                self.guard.validate_table(child_alias_name)?;
                 
                 let (pa, pr) = if let Some(ns) = &node.source {
                     (ns.table_name.clone(), self.guard.resolve_alias(&ns.table_name)?)
@@ -328,7 +340,7 @@ impl SqlGenerator {
                 }
                 
                 for (fk, fv) in &child.fields {
-                    self.guard.validate_field(&child_real, fv)?;
+                    self.guard.validate_field(child_alias_name, fv)?;
                     let processed = Guard::auto_prefix_field(fv, child_alias_name);
                     
                     if child.flatten {
@@ -472,10 +484,10 @@ impl SqlGenerator {
 
     /// Builds an adjacency graph from relation keys for path discovery.
     /// Parses keys like "a->b", "a<->b", "a->b:name" into edges.
-    fn build_relation_graph(&self) -> HashMap<String, Vec<String>> {
+    fn build_relation_graph(relations: &HashMap<String, String>) -> HashMap<String, Vec<String>> {
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
 
-        for key in self.relations.keys() {
+        for key in relations.keys() {
             let is_bidi = key.contains("<->");
             let parts: Vec<&str> = if is_bidi {
                 key.splitn(2, "<->").collect()
@@ -505,10 +517,9 @@ impl SqlGenerator {
         graph
     }
 
-    /// BFS to find shortest path from `from` to `to` through the relation graph.
-    /// Returns the path as a list of alias names (including from and to).
+    /// BFS to find shortest path from `from` to `to` through the cached relation graph.
     fn find_relation_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
-        let graph = self.build_relation_graph();
+        let graph = &self.relation_graph;
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
 
@@ -552,7 +563,7 @@ impl SqlGenerator {
 
             let from_real = self.guard.resolve_alias(step_from)?;
             let to_real = self.guard.resolve_alias(step_to)?;
-            self.guard.validate_table(&to_real)?;
+            self.guard.validate_table(step_to)?;
 
             let join = self.resolve_relation(step_from, step_to, &from_real, &to_real, step_to)?;
 
@@ -569,6 +580,34 @@ impl SqlGenerator {
 
         Ok(())
     }
+
+    /// Overrides the JOIN type keyword in a generated JOIN string.
+    /// e.g., "INNER JOIN table ON ..." → "LEFT JOIN table ON ..."
+    fn override_join_type(join_str: &str, join_type: &str) -> String {
+        let upper = join_str.to_uppercase();
+        let replacement = match join_type.as_ref() {
+            "left" => "LEFT JOIN",
+            "right" => "RIGHT JOIN",
+            "inner" => "INNER JOIN",
+            "cross" => "CROSS JOIN",
+            _ => return join_str.to_string(), // unknown → no change
+        };
+        // Replace any existing JOIN type prefix
+        if upper.starts_with("INNER JOIN") {
+            format!("{}{}", replacement, &join_str[10..])
+        } else if upper.starts_with("LEFT JOIN") {
+            format!("{}{}", replacement, &join_str[9..])
+        } else if upper.starts_with("RIGHT JOIN") {
+            format!("{}{}", replacement, &join_str[10..])
+        } else if upper.starts_with("CROSS JOIN") {
+            format!("{}{}", replacement, &join_str[10..])
+        } else if upper.starts_with("JOIN") {
+            format!("{}{}", replacement, &join_str[4..])
+        } else {
+            join_str.to_string()
+        }
+    }
+
     /// Only @1, @2, @table placeholders are allowed.
     fn validate_relation_template(template: &str, table1: &str, table2: &str, key: &str) -> Result<(), String> {
         // Remove all valid placeholders first, then check for raw names

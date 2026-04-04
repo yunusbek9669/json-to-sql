@@ -15,6 +15,10 @@ pub struct SourceDef {
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub order: Option<String>,
+    /// Override JOIN type: "left", "right", "inner" (from $join modifier)
+    pub join_type: Option<String>,
+    /// Explicit relation name (from $rel modifier, maps to :node_name suffix)
+    pub rel: Option<String>,
 }
 
 pub struct QueryNode {
@@ -25,6 +29,8 @@ pub struct QueryNode {
     pub flatten: bool,
     pub fields: IndexMap<String, String>,
     pub children: Vec<QueryNode>,
+    /// Query mode: "list" (default), "count", "first"
+    pub mode: Option<String>,
 }
 
 
