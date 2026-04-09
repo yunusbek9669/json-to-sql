@@ -45,11 +45,26 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
             info_result.insert("relations".to_string(), json!(keys));
         }
 
+        let mut build_args = vec![];
         if is_tables && !whitelist_input.is_null() {
+            build_args.push("'tables', COALESCE((SELECT tables_obj FROM tables_json), '{}'::jsonb)".to_string());
+        }
+        if is_relations {
+            let rel_escaped = included_relations.replace("'", "''");
+            build_args.push(format!("'relations', '{}'::jsonb", rel_escaped));
+        }
+        
+        let build_args_str = if build_args.is_empty() {
+            "'result', '{}'::jsonb".to_string()
+        } else {
+            build_args.join(",\n    ")
+        };
+
+        let sql_query = if is_tables && !whitelist_input.is_null() {
             let whitelist_str = unsafe { CStr::from_ptr(whitelist_input).to_str().unwrap_or("{}") };
             let wl_escaped = whitelist_str.replace("'", "''");
-            let rel_escaped = included_relations.replace("'", "''");
-            let sql_query = format!(r#"WITH input_json AS (
+
+            format!(r#"WITH input_json AS (
     SELECT '{}'::jsonb AS data
 ),
 parsed_tables AS (
@@ -111,11 +126,15 @@ tables_json AS (
     ) subquery
 )
 SELECT jsonb_build_object(
-    'tables', COALESCE((SELECT tables_obj FROM tables_json), '{{}}'::jsonb),
-    'relations', '{}'::jsonb
-) AS result;"#, wl_escaped, rel_escaped);
-            info_result.insert("sql".to_string(), json!(sql_query));
-        }
+    {}
+) AS result;"#, wl_escaped, build_args_str)
+        } else {
+            format!(r#"SELECT jsonb_build_object(
+    {}
+) AS result;"#, build_args_str)
+        };
+
+        info_result.insert("sql".to_string(), json!(sql_query));
 
         let mut result = json!({
             "isOk": true,
