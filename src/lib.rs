@@ -35,10 +35,20 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         let is_relations = info_arr.iter().any(|v| v.as_str() == Some("@relations"));
         
         let mut info_result = serde_json::Map::new();
+        let mut included_relations = String::from("[]");
+
+        if is_relations && !relations_input.is_null() {
+            let rel_str = unsafe { CStr::from_ptr(relations_input).to_str().unwrap_or("{}") };
+            let rel_map: HashMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
+            let keys: Vec<String> = rel_map.keys().cloned().collect();
+            included_relations = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+            info_result.insert("relations".to_string(), json!(keys));
+        }
 
         if is_tables && !whitelist_input.is_null() {
             let whitelist_str = unsafe { CStr::from_ptr(whitelist_input).to_str().unwrap_or("{}") };
             let wl_escaped = whitelist_str.replace("'", "''");
+            let rel_escaped = included_relations.replace("'", "''");
             let sql_query = format!(r#"WITH input_json AS (
     SELECT '{}'::jsonb AS data
 ),
@@ -91,21 +101,20 @@ joined_schema AS (
       ON c.table_name = pc.table_name 
       AND c.table_schema = 'public'
       AND (pc.real_col = '*' OR c.column_name = pc.real_col)
+),
+tables_json AS (
+    SELECT jsonb_object_agg(table_alias, cols) AS tables_obj
+    FROM (
+        SELECT table_alias, jsonb_object_agg(final_col_alias, data_type) AS cols
+        FROM joined_schema
+        GROUP BY table_alias
+    ) subquery
 )
-SELECT jsonb_object_agg(table_alias, cols) AS result
-FROM (
-    SELECT table_alias, jsonb_object_agg(final_col_alias, data_type) AS cols
-    FROM joined_schema
-    GROUP BY table_alias
-) subquery;"#, wl_escaped);
+SELECT jsonb_build_object(
+    'tables', COALESCE((SELECT tables_obj FROM tables_json), '{{}}'::jsonb),
+    'relations', '{}'::jsonb
+) AS result;"#, wl_escaped, rel_escaped);
             info_result.insert("sql".to_string(), json!(sql_query));
-        }
-        
-        if is_relations && !relations_input.is_null() {
-            let rel_str = unsafe { CStr::from_ptr(relations_input).to_str().unwrap_or("{}") };
-            let rel_map: HashMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
-            let keys: Vec<String> = rel_map.keys().cloned().collect();
-            info_result.insert("relations".to_string(), json!(keys));
         }
 
         let mut result = json!({
@@ -347,7 +356,7 @@ mod tests {
         
         assert!(result.is_err(), "Should reject raw table name when alias exists");
         let err = result.unwrap_err();
-        assert!(err.contains("is strictly prohibited by whitelist"), "Error should match whitelist format: {}", err);
+        assert!(err.contains("does not exist"), "Error should match whitelist format: {}", err);
         println!("Enforcement error (expected): {}", err);
     }
 

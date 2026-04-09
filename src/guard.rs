@@ -105,7 +105,7 @@ impl Guard {
         // If it's a real table name that should be aliased, block it
         if self.aliased_tables.contains(name) {
             return Err(format!(
-                "Table '{}' is strictly prohibited by whitelist",
+                "Table '{}' does not exist",
                 name
             ));
         }
@@ -148,7 +148,7 @@ impl Guard {
         // Check against whitelist if active (using the provided alias or real table name)
         if let Some(wl) = &self.whitelist {
             if !wl.contains_key(context) {
-                return Err(format!("Table '{}' is strictly prohibited by whitelist", context));
+                return Err(format!("Table '{}' does not exist", context));
             }
         }
 
@@ -172,10 +172,10 @@ impl Guard {
         if let Some(wl) = &self.whitelist {
             if let Some(rule) = wl.get(context) {
                 if !rule.is_allowed(raw_field) {
-                    return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, context));
+                    return Err(format!("Column '{}' does not exist in table '{}'", raw_field, context));
                 }
             } else {
-                return Err(format!("Table '{}' is missing from whitelist context", context));
+                return Err(format!("Table '{}' does not exist", context));
             }
         }
         Ok(())
@@ -211,12 +211,12 @@ impl Guard {
                         // Strip potential prefix to match whitelist directly
                         let clean_ident = if let Some((_, col)) = ident.split_once('.') { col } else { ident };
                         if !rule.is_allowed(clean_ident) {
-                            return Err(format!("Expression column '{}' is blocked for table '{}'", clean_ident, context));
+                            return Err(format!("Column '{}' does not exist in table '{}'", clean_ident, context));
                         }
                     }
                 }
             } else {
-                 return Err(format!("Table '{}' is blocked", context));
+                 return Err(format!("Table '{}' does not exist", context));
             }
         }
 
