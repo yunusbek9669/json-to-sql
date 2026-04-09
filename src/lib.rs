@@ -25,13 +25,112 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         Err(_) => return create_error_result("Invalid UTF-8 in input"),
     };
 
+    let parsed_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return create_error_result("Invalid JSON format"),
+    };
+
+    if let Some(info_arr) = parsed_json.get("@info").and_then(|v| v.as_array()) {
+        let is_tables = info_arr.iter().any(|v| v.as_str() == Some("@tables"));
+        let is_relations = info_arr.iter().any(|v| v.as_str() == Some("@relations"));
+        
+        let mut info_result = serde_json::Map::new();
+
+        if is_tables && !whitelist_input.is_null() {
+            let whitelist_str = unsafe { CStr::from_ptr(whitelist_input).to_str().unwrap_or("{}") };
+            let wl_escaped = whitelist_str.replace("'", "''");
+            let sql_query = format!(r#"WITH input_json AS (
+    SELECT '{}'::jsonb AS data
+),
+parsed_tables AS (
+    SELECT 
+        split_part(key, ':', 1) AS table_name,
+        COALESCE(NULLIF(split_part(key, ':', 2), ''), split_part(key, ':', 1)) AS table_alias,
+        value AS col_data
+    FROM input_json, jsonb_each(data)
+),
+parsed_columns AS (
+    SELECT 
+        pt.table_name,
+        pt.table_alias,
+        obj.value AS real_col,
+        CASE 
+            WHEN obj.key ~ '^[0-9]+$' THEN obj.value
+            ELSE obj.key
+        END AS col_alias
+    FROM parsed_tables pt
+    CROSS JOIN LATERAL jsonb_each_text(
+        CASE WHEN jsonb_typeof(pt.col_data) = 'object' THEN pt.col_data ELSE '{{}}'::jsonb END
+    ) obj
+    
+    UNION ALL
+
+    SELECT 
+        pt.table_name,
+        pt.table_alias,
+        arr.value AS real_col,
+        arr.value AS col_alias
+    FROM parsed_tables pt
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(pt.col_data) = 'array' THEN pt.col_data ELSE '[]'::jsonb END
+    ) arr
+),
+joined_schema AS (
+    SELECT 
+        pc.table_alias,
+        CASE 
+            WHEN pc.real_col = '*' THEN COALESCE(c.column_name, 'TABLE_NOT_FOUND') 
+            ELSE pc.col_alias 
+        END AS final_col_alias,
+        CASE 
+            WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'text' 
+            ELSE COALESCE(c.data_type, 'COLUMN_NOT_FOUND_IN_DB') 
+        END AS data_type
+    FROM parsed_columns pc
+    LEFT JOIN information_schema.columns c 
+      ON c.table_name = pc.table_name 
+      AND c.table_schema = 'public'
+      AND (pc.real_col = '*' OR c.column_name = pc.real_col)
+)
+SELECT jsonb_object_agg(table_alias, cols) AS result
+FROM (
+    SELECT table_alias, jsonb_object_agg(final_col_alias, data_type) AS cols
+    FROM joined_schema
+    GROUP BY table_alias
+) subquery;"#, wl_escaped);
+            info_result.insert("sql".to_string(), json!(sql_query));
+        }
+        
+        if is_relations && !relations_input.is_null() {
+            let rel_str = unsafe { CStr::from_ptr(relations_input).to_str().unwrap_or("{}") };
+            let rel_map: HashMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
+            let keys: Vec<String> = rel_map.keys().cloned().collect();
+            info_result.insert("relations".to_string(), json!(keys));
+        }
+
+        let mut result = json!({
+            "isOk": true,
+            "sql": null,
+            "params": null,
+            "structure": info_result.clone(),
+            "message": "info"
+        });
+        
+        if let Some(sql_val) = info_result.get("sql") {
+            result["sql"] = sql_val.clone();
+        }
+        
+        let serialized = serde_json::to_string(&result).unwrap();
+        return CString::new(serialized).unwrap().into_raw();
+    }
+
     let whitelist_str = if whitelist_input.is_null() {
         None
     } else {
         unsafe { CStr::from_ptr(whitelist_input).to_str().ok() }
     };
     
-    let whitelist: Option<HashMap<String, Vec<String>>> = if let Some(s) = whitelist_str {
+    let whitelist: Option<HashMap<String, serde_json::Value>> = if let Some(s) = whitelist_str {
         if s.trim().is_empty() {
              None
         } else {
@@ -210,8 +309,8 @@ mod tests {
 
         // Whitelist with aliases: "real_table:alias"
         let mut wl = std::collections::HashMap::new();
-        wl.insert("employee:emp".to_string(), vec!["id".to_string(), "last_name".to_string(), "first_name".to_string(), "status".to_string(), "organization_id".to_string()]);
-        wl.insert("structure_organization:org".to_string(), vec!["*".to_string()]);
+        wl.insert("employee:emp".to_string(), json!(["id", "last_name", "first_name", "status", "organization_id"]));
+        wl.insert("structure_organization:org".to_string(), json!(["*"]));
 
         // Relations use ALIAS names in keys
         let mut rels = std::collections::HashMap::new();
@@ -240,7 +339,7 @@ mod tests {
         }"#;
 
         let mut wl = std::collections::HashMap::new();
-        wl.insert("employee:emp".to_string(), vec!["*".to_string()]);
+        wl.insert("employee:emp".to_string(), json!(["*"]));
 
         let root = parser::parse_json(json_input).expect("Should parse");
         let gen_inst = generator::SqlGenerator::new(Some(wl), None);
@@ -272,11 +371,11 @@ mod tests {
         }"#;
 
         let mut wl = std::collections::HashMap::new();
-        wl.insert("employee:emp".to_string(), vec!["*".to_string()]);
-        wl.insert("employee_department_staff_position:dept".to_string(), vec!["*".to_string()]);
-        wl.insert("shtat_department_basic:dept_basic".to_string(), vec!["*".to_string()]);
-        wl.insert("structure_organization:org".to_string(), vec!["*".to_string()]);
-        wl.insert("structure_organization:inner_org".to_string(), vec!["*".to_string()]);
+        wl.insert("employee:emp".to_string(), json!(["*"]));
+        wl.insert("employee_department_staff_position:dept".to_string(), json!(["*"]));
+        wl.insert("shtat_department_basic:dept_basic".to_string(), json!(["*"]));
+        wl.insert("structure_organization:org".to_string(), json!(["*"]));
+        wl.insert("structure_organization:inner_org".to_string(), json!(["*"]));
 
         let mut rels = std::collections::HashMap::new();
         rels.insert("emp->dept".to_string(), "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1".to_string());
@@ -297,5 +396,94 @@ mod tests {
         assert!(sql_str.contains("INNER JOIN structure_organization AS inner_org"), "Target: inner_org");
 
         println!("Auto-Path SQL:\n{}", serde_json::to_string_pretty(&result).unwrap());
+    }
+
+    #[test]
+    fn test_info_endpoint() {
+        let json_input = "{\"@info\": [\"@tables\", \"@relations\"]}\0".as_ptr() as *const c_char;
+        let whitelist_input = "{\"employee:emp\": {\"unique\": \"id\", \"full_name\": \"CONCAT(name)\"}, \"org\": [\"*\"]}\0".as_ptr() as *const c_char;
+        let relations_input = "{\"emp->org\": \"JOIN\", \"org->dept\": \"JOIN\"}\0".as_ptr() as *const c_char;
+
+        let result_ptr = uaq_parse(json_input, whitelist_input, relations_input);
+        assert!(!result_ptr.is_null());
+
+        let c_str = unsafe { CStr::from_ptr(result_ptr) };
+        let result_str = c_str.to_str().unwrap();
+        println!("Info Result: {}", result_str);
+        
+        let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap();
+        assert_eq!(result_json["isOk"], true);
+        assert_eq!(result_json["message"], "info");
+        
+        let structure = result_json["structure"].as_object().unwrap();
+        assert!(structure.contains_key("sql"));
+        assert!(structure.contains_key("relations"));
+        
+        // Also check root sql property
+        let sql = result_json["sql"].as_str().unwrap();
+        assert!(sql.contains("WITH input_json AS"));
+        assert!(sql.contains("CONCAT(name)"));
+        
+        let rels = structure["relations"].as_array().unwrap();
+        assert_eq!(rels.len(), 2);
+        
+        uaq_free_string(result_ptr);
+    }
+
+    #[test]
+    fn test_user_complex_mapping() {
+        let json_input = concat!(r#"{
+          "@source": "emp[status: 1, id: 1000..2145, $limit: 20, $order: id DESC]",
+          "@fields": {
+            "id": "id",
+            "full_name": "CONCAT(last_name, ' ', first_name)",
+            "passport": "jshshir",
+            "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
+          },
+          "0": {
+              "@source": "org[red: 1]",
+              "@flatten": true,
+              "@fields": {
+                  "viloyat boshqarma": "name"
+              }
+          }
+        }"#, "\0").as_ptr() as *const c_char;
+
+        let whitelist_input = concat!(r#"{
+          "employee:emp": ["*"],
+          "structure_organization:org": {
+            "unique": "id",
+            "name": "name_uz",
+            "red": "status"
+          },
+          "structure_organization:inner_org": ["id", "name_uz", "status"],
+          "employee_department_staff_position:department_staff_position": ["*"],
+          "shtat_department_basic:department_basic": ["*"]
+        }"#, "\0").as_ptr() as *const c_char;
+
+        let relations_input = concat!(r#"{
+          "emp->department_staff_position": "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1",
+          "department_staff_position->department_basic": "INNER JOIN @table ON @1.department_basic_id = @2.id",
+          "department_basic<->org": "INNER JOIN @table ON @1.organization_id = @2.id AND @1.status = 1",
+          "department_basic<->inner_org": "INNER JOIN @table ON @1.command_organization_id = @2.id AND @1.status = 1"
+        }"#, "\0").as_ptr() as *const c_char;
+
+        let result_ptr = uaq_parse(json_input, whitelist_input, relations_input);
+        assert!(!result_ptr.is_null());
+
+        let c_str = unsafe { CStr::from_ptr(result_ptr) };
+        let result_str = c_str.to_str().unwrap();
+        println!("User Mapping Result:\n{}", result_str);
+        
+        let result_json: serde_json::Value = serde_json::from_str(result_str).unwrap();
+        assert_eq!(result_json["isOk"], true);
+        
+        let sql = result_json["sql"].as_str().unwrap();
+        assert!(sql.contains("CONCAT(emp.last_name, ' ', emp.first_name)"));
+        // `name_uz` should be prefixed with org
+        assert!(sql.contains("org.name_uz"));
+        // Since it's aliased natively
+        
+        uaq_free_string(result_ptr);
     }
 }

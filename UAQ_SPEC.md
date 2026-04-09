@@ -136,18 +136,28 @@ Backend Controller tarafidan beriladi. Mijoz qaysi jadvalning qaysi ustunlarini 
 
 **Format:** `"real_table_name:alias"` — alias ixtiyoriy. Agar alias berilsa, frontend `@source` da faqat shu aliasni yozadi. SQL da esa haqiqiy jadval nomi ishlatiladi.
 
+**1-variant (Oddiy ro'yxat):** Faqat ruxsat etilgan haqiqiy ustunlar ro'yxati.
 ```json
 {
   "employee:emp": ["id", "last_name", "first_name", "jshshir", "status", "birthday", "organization_id"],
-  "employee_rel_organization:emp_rel_org": ["*"],
-  "structure_organization:org": ["id", "name_uz", "code"],
-  "employee_department_staff_position:department_staff_position": ["*"],
-  "manuals_staff_position:staff_position": ["id", "name_uz"],
-  "employee_department_military_degree:department_military_degree": ["*"],
-  "manuals_military_degree:military_degree": ["id", "name_uz"]
+  "employee_rel_organization:emp_rel_org": ["*"]
 }
 ```
 *Eslatma: `["*"]` — barcha ustunlarga ruxsat. Aliassiz ham yozish mumkin: `"employee": [...]`*
+
+**2-variant (Murakkab Mapping va SQL ifodalar xaritasi):** 
+DB arxitekturasini front-end'dan mutlaqo yashirish uchun obyektli xaritalash qo'llaniladi. Forward qilingan aliaslar orqali frontend ishlashga majbur.
+```json
+{
+  "structure_organization:org": {
+    "unique": "id",
+    "name": "name_uz",
+    "red": "status",
+    "full_name": "CONCAT(last_name, ' ', first_name)"
+  }
+}
+```
+*Izoh: Ushbu holatda frontend SQL injection yoki haqiqiy DB ustunidan foydalana olmaydi. Masalan ro'yxatni olish uchun `@source: "org[red: 1]"` shaklida ishlatishga majbur. Kutubxona buni avtomatik ravishda `org.status = 1` ga xavfsiz o'girib beradi. Va `full_name` degan nom kiritilganda uni `CONCAT(org.last_name, ' ', org.first_name)` ga kengaytiradi (expand).*
 
 ### 3.2. Relations Input (3rd Parameter — Auto-Join)
 Jadvallarning o'zaro qanday JOIN bo'lishini aniqlaydi. Frontend `@join` yozishi shart emas — Engine avtomatik aniqlaydi.
@@ -210,6 +220,17 @@ INNER JOIN structure_organization AS inner_org ON dept_basic.command_organizatio
 ```
 
 *Eslatma: Takroriy oraliq jadvallar avtomatik o'tkazib yuboriladi. Masalan, `dept` va `dept_basic` faqat bir marta join qilinadi.*
+
+### 3.4. Database Introspection (`@info` maxsus so'rovi)
+Kutubxona frontend dasturchilar yoki backend middleware interfeyschilar uchun **Tizim strukturasi** bilan ishlashga `@info` request mexanizmini beradi:
+```json
+{
+  "@info": ["@tables", "@relations"]
+}
+```
+Bunday json yuborilganda Engine normal parser ishlashini to'xtatadi va shunday natija qaytaradi:
+1. `"sql"` parametriga Frontendga qulay bo'lishi uchun Whitelist xaritasidagi tiplarni topuvchi katta PostgreSQL CTE querysini joylaydi.
+2. `"structure": { "relations": [...] }` ro'yxatida Relations ro'yxatining kalitlarini jo'natadi.
 
 ---
 

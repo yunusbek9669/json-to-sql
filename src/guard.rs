@@ -1,9 +1,40 @@
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone)]
+pub enum WhitelistRule {
+    /// ["id", "name", "*"] 
+    Allowed(HashSet<String>),
+    /// {"unique": "id", "full_name": "CONCAT(...)"}
+    Mapping(HashMap<String, String>),
+}
+
+impl WhitelistRule {
+    pub fn is_allowed(&self, field: &str) -> bool {
+        match self {
+            Self::Allowed(set) => set.contains("*") || set.contains(field),
+            Self::Mapping(map) => map.contains_key("*") || map.contains_key(field),
+        }
+    }
+    pub fn get_mapping(&self, field: &str) -> Option<String> {
+        match self {
+            Self::Mapping(map) => {
+                if let Some(m) = map.get(field) {
+                    Some(m.clone())
+                } else if map.contains_key("*") {
+                    Some(field.to_string())
+                } else {
+                    None
+                }
+            },
+            Self::Allowed(set) => if set.contains("*") || set.contains(field) { Some(field.to_string()) } else { None },
+        }
+    }
+}
+
 pub struct Guard {
-    /// real_table -> allowed_columns
-    pub whitelist: Option<HashMap<String, Vec<String>>>,
+    /// alias -> WhitelistRule
+    pub whitelist: Option<HashMap<String, WhitelistRule>>,
     /// alias -> real_table (e.g. "org" -> "structure_organization")
     pub alias_map: HashMap<String, String>,
     /// Set of real table names that have aliases (for enforcement)
@@ -12,24 +43,42 @@ pub struct Guard {
 
 impl Guard {
     /// Parses whitelist keys with optional alias: "real_table:alias" -> columns
-    /// Builds both whitelist (real_table -> columns) and alias_map (alias -> real_table)
-    pub fn new(raw_whitelist: Option<HashMap<String, Vec<String>>>) -> Self {
+    /// Builds both whitelist (alias -> rule) and alias_map (alias -> real_table)
+    pub fn new(raw_whitelist: Option<HashMap<String, serde_json::Value>>) -> Self {
         let mut alias_map = HashMap::new();
         let mut aliased_tables = HashSet::new();
         
         let whitelist = if let Some(raw) = raw_whitelist {
             let mut clean_whitelist = HashMap::new();
-            for (key, columns) in raw {
+            for (key, val) in raw {
+                let rule = if let Some(arr) = val.as_array() {
+                    let mut set = HashSet::new();
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            set.insert(s.to_string());
+                        }
+                    }
+                    WhitelistRule::Allowed(set)
+                } else if let Some(obj) = val.as_object() {
+                    let mut map = HashMap::new();
+                    for (k, v) in obj {
+                        if let Some(s) = v.as_str() {
+                            map.insert(k.to_string(), s.to_string());
+                        }
+                    }
+                    WhitelistRule::Mapping(map)
+                } else {
+                    WhitelistRule::Allowed(HashSet::new())
+                };
+
                 if let Some((real_table, alias)) = key.split_once(':') {
                     let real_table = real_table.trim().to_string();
                     let alias = alias.trim().to_string();
                     alias_map.insert(alias.clone(), real_table.clone());
                     aliased_tables.insert(real_table.clone());
-                    // Use alias as the key in whitelist for better security context
-                    clean_whitelist.insert(alias, columns);
+                    clean_whitelist.insert(alias, rule);
                 } else {
-                    // No alias — table name is used directly as context
-                    clean_whitelist.insert(key, columns);
+                    clean_whitelist.insert(key, rule);
                 }
             }
             Some(clean_whitelist)
@@ -114,7 +163,6 @@ impl Guard {
             return Err(format!("Invalid identifier format: {} in table {}", field, context));
         }
         
-        // Strip out table prefix if present, e.g. "personal.id" -> "id"
         let raw_field = if let Some((_, col)) = field.split_once('.') {
             col
         } else {
@@ -122,8 +170,8 @@ impl Guard {
         };
 
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(context) {
-                if !allowed.contains(&"*".to_string()) && !allowed.contains(&raw_field.to_string()) {
+            if let Some(rule) = wl.get(context) {
+                if !rule.is_allowed(raw_field) {
                     return Err(format!("Column '{}' is not on the whitelist for table '{}'", raw_field, context));
                 }
             } else {
@@ -149,8 +197,8 @@ impl Guard {
 
         // Ensure identifiers inside the expression exist in the whitelist
         if let Some(wl) = &self.whitelist {
-            if let Some(allowed) = wl.get(context) {
-                if !allowed.contains(&"*".to_string()) {
+            if let Some(rule) = wl.get(context) {
+                if !rule.is_allowed("*") {
                     let re_str = Regex::new(r"'[^']*'").unwrap();
                     let field_no_str = re_str.replace_all(field, "");
                     let re_ident = Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap();
@@ -162,7 +210,7 @@ impl Guard {
                         
                         // Strip potential prefix to match whitelist directly
                         let clean_ident = if let Some((_, col)) = ident.split_once('.') { col } else { ident };
-                        if !allowed.contains(&clean_ident.to_string()) {
+                        if !rule.is_allowed(clean_ident) {
                             return Err(format!("Expression column '{}' is blocked for table '{}'", clean_ident, context));
                         }
                     }
@@ -218,6 +266,78 @@ impl Guard {
             }
         }
         Ok(())
+    }
+
+    pub fn expand_mapped_fields(&self, field_sql: &str, context: &str) -> String {
+        let wl = match &self.whitelist {
+            Some(w) => w,
+            None => return field_sql.to_string(),
+        };
+        let rule = match wl.get(context) {
+            Some(r) => r,
+            None => return field_sql.to_string(),
+        };
+
+        if matches!(rule, WhitelistRule::Allowed(_)) {
+            return field_sql.to_string(); // No expressions mapping to do
+        }
+
+        let mut result = String::with_capacity(field_sql.len() + 20);
+        let mut in_quotes = false;
+        let mut current_word = String::new();
+        
+        let chars: Vec<char> = field_sql.chars().collect();
+        let mut i = 0;
+        
+        while i < chars.len() {
+            let c = chars[i];
+            
+            if c == '\'' {
+                in_quotes = !in_quotes;
+                if !current_word.is_empty() {
+                    let raw_field = if let Some((_, col)) = current_word.split_once('.') { col } else { &current_word };
+                    let mapped = rule.get_mapping(raw_field).unwrap_or(current_word.clone());
+                    result.push_str(&mapped);
+                    current_word.clear();
+                }
+                result.push(c);
+            } else if !in_quotes && (c.is_alphanumeric() || c == '_') {
+                current_word.push(c);
+            } else {
+                if !current_word.is_empty() {
+                    let raw_field = if let Some((_, col)) = current_word.split_once('.') { col } else { &current_word };
+                    let is_numeric = current_word.parse::<f64>().is_ok();
+                    if !is_numeric {
+                        if let Some(mapped) = rule.get_mapping(raw_field) {
+                            result.push_str(&mapped);
+                        } else {
+                            result.push_str(&current_word);
+                        }
+                    } else {
+                        result.push_str(&current_word);
+                    }
+                    current_word.clear();
+                }
+                result.push(c);
+            }
+            i += 1;
+        }
+        
+        if !current_word.is_empty() {
+            let raw_field = if let Some((_, col)) = current_word.split_once('.') { col } else { &current_word };
+            let is_numeric = current_word.parse::<f64>().is_ok();
+            if !is_numeric {
+                 if let Some(mapped) = rule.get_mapping(raw_field) {
+                     result.push_str(&mapped);
+                 } else {
+                     result.push_str(&current_word);
+                 }
+            } else {
+                 result.push_str(&current_word);
+            }
+        }
+        
+        result
     }
 
     pub fn auto_prefix_field(field_sql: &str, table_alias: &str) -> String {
