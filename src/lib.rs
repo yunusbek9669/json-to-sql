@@ -108,6 +108,11 @@ joined_schema AS (
             ELSE pc.col_alias 
         END AS final_col_alias,
         CASE 
+            WHEN pc.real_col ~* 'THEN\s+(true|false)' THEN 'boolean'
+            WHEN pc.real_col ~* '::boolean' THEN 'boolean'
+            WHEN pc.real_col ~* '::(integer|int|bigint|smallint)' THEN 'integer'
+            WHEN pc.real_col ~* '::(numeric|decimal|real|double)' THEN 'numeric'
+            WHEN pc.real_col ~* '^(COUNT|SUM|AVG|MIN|MAX)\(' THEN 'numeric'
             WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'text' 
             ELSE COALESCE(c.data_type, 'COLUMN_NOT_FOUND_IN_DB') 
         END AS data_type
