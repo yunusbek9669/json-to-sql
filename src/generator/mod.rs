@@ -84,15 +84,31 @@ impl SqlGenerator {
             }
         }
         
-        // Wrap in json_agg
+        // Wrap depending on whether root node is a list
         let mut final_sql = String::new();
-        final_sql.push_str("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) \nFROM (\n");
-        for line in base_sql.lines() {
-            final_sql.push_str("  ");
-            final_sql.push_str(line);
-            final_sql.push_str("\n");
+        
+        if root.is_list {
+            final_sql.push_str("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) \nFROM (\n");
+            for line in base_sql.lines() {
+                final_sql.push_str("  ");
+                final_sql.push_str(line);
+                final_sql.push_str("\n");
+            }
+            final_sql.push_str(") t");
+        } else {
+            // For a single object, we don't aggregate, and we limit results to 1 to ensure a single JSON object
+            final_sql.push_str("SELECT t.uaq_data \nFROM (\n");
+            for line in base_sql.lines() {
+                final_sql.push_str("  ");
+                final_sql.push_str(line);
+                final_sql.push_str("\n");
+            }
+            // Ensuring it's only one row for single object
+            if root.source.as_ref().and_then(|s| s.limit).is_none() {
+                final_sql.push_str("  LIMIT 1\n");
+            }
+            final_sql.push_str(") t");
         }
-        final_sql.push_str(") t");
         
         Ok(ParseResult {
             is_ok: true,

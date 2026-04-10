@@ -5,7 +5,9 @@
    Ushbu loyiha frontenddan keladigan deklarativ JSON formatini tahlil qilib, xavfsiz, optimallashgan va parametrli PostgreSQL so'rovlarini generatsiya qiluvchi universal kutubxonani yaratishni maqsad qilgan. Kutubxona Rust tilida yoziladi va C-ABI orqali har qanday dasturlash tilida (PHP, Java, Node.js, Python) "native" tezlikda ishlash imkoniyatiga ega bo'ladi.
 
 ## 2. Frontend Request Specification (The Declarative JSON)
-   Frontendchi backendga ma'lumotlar strukturasini va filtrlarini bitta ierarxik JSONda yuboradi. JSON ning o'zi to'g'ridan-to'g'ri root node hisoblanadi (`@data` o'rami kerak emas).
+   Frontendchi backendga ma'lumotlar strukturasini va filtrlarini bitta ierarxik JSONda yuboradi. So'rov qat'iy ravishda faqatgina quyidagi ikkita asosiy kalit so'zlardan biri orqali qabul qilinadi:
+   - `@info`: Tizim strukturasi (jadvallar, relationlar) haqida ma'lumot olish uchun.
+   - `@data` yoki `@data[]`: Aniq ma'lumot (SQL) bazadan so'rash uchun. `@data` yolg'iz bitta Obyekt (Object) qaytaradi, `@data[]` esa Massiv (Array) holatda ro'yxat qaytaradi. Boshqa barcha ichki node'lar (ixtiyoriy bog'lanish nomlari garchi ichki bo'lsa ham) shunday `[]` qo'shimchasi qoidasiga bo'ysunadi.
 
 ### Direktivalar:
 
@@ -42,69 +44,73 @@ table_name[field: value, field: operator value, $limit: N, $order: column DIR, $
 | `$offset` | Boshlang'ich o'tkazib yuborish | `$offset: 100`             |
 | `$order`  | Tartiblash                     | `$order: id DESC` |
 
-### Oddiy so'rov namunasi:
+### Oddiy so'rov namunasi (Massiv qaytaradi):
 ```json
 {
-  "@source": "emp[status: 1, $limit: 10, $order: id DESC]",
-  "@fields": {
-    "id": "id",
-    "full_name": "CONCAT(last_name, ' ', first_name)"
+  "@data[]": {
+    "@source": "emp[status: 1, $limit: 10, $order: id DESC]",
+    "@fields": {
+      "id": "id",
+      "full_name": "CONCAT(last_name, ' ', first_name)"
+    }
   }
 }
 ```
 
-### Murakkab so'rov namunasi (JOIN + Flatten + List):
+### Murakkab so'rov namunasi (JOIN + Flatten + List, Yagona Obyekt qaytaradi):
 ```json
 {
-  "@source": "emp[status: 1, id: 1..45, $limit: 2, $order: id DESC]",
-  "@fields": {
-    "id": "id",
-    "full_name": "CONCAT(last_name, ' ', first_name)",
-    "passport": "jshshir",
-    "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
-  },
-  "boshqarma": {
-    "@source": "emp_rel_org[status: 1]",
-    "@fields": {
-      "begin_date": "TO_CHAR(TO_TIMESTAMP(created_at), 'DD.MM.YYYY')"
-    },
-    "0": {
-      "@source": "org[status: 1]",
-      "@flatten": true,
-      "@fields": {
-        "name": "name_uz"
-      }
-    }
-  },
-  "positions[]": {
-    "@source": "department_staff_position[current_position: 1, $limit: 5, $order: id DESC]",
+  "@data": {
+    "@source": "emp[status: 1, id: 1..45, $limit: 2, $order: id DESC]",
     "@fields": {
       "id": "id",
-      "begin_date": "TO_CHAR(TO_TIMESTAMP(staff_position_start_time), 'DD.MM.YYYY')"
+      "full_name": "CONCAT(last_name, ' ', first_name)",
+      "passport": "jshshir",
+      "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
     },
-    "0": {
-      "@source": "shtat_staff_position_basic[status: 1]",
-      "@flatten": true,
+    "boshqarma": {
+      "@source": "emp_rel_org[status: 1]",
+      "@fields": {
+        "begin_date": "TO_CHAR(TO_TIMESTAMP(created_at), 'DD.MM.YYYY')"
+      },
       "0": {
-        "@source": "staff_position[status: 1]",
+        "@source": "org[status: 1]",
         "@flatten": true,
         "@fields": {
           "name": "name_uz"
         }
       }
-    }
-  },
-  "degree": {
-    "@source": "department_military_degree[current_degree: 1]",
-    "@fields": {
-      "id": "id",
-      "degree_given_time": "TO_CHAR(TO_TIMESTAMP(degree_given_time), 'DD.MM.YYYY')"
     },
-    "0": {
-      "@source": "military_degree[status: 1]",
-      "@flatten": true,
+    "positions[]": {
+      "@source": "department_staff_position[current_position: 1, $limit: 5, $order: id DESC]",
       "@fields": {
-        "name": "name_uz"
+        "id": "id",
+        "begin_date": "TO_CHAR(TO_TIMESTAMP(staff_position_start_time), 'DD.MM.YYYY')"
+      },
+      "0": {
+        "@source": "shtat_staff_position_basic[status: 1]",
+        "@flatten": true,
+        "0": {
+          "@source": "staff_position[status: 1]",
+          "@flatten": true,
+          "@fields": {
+            "name": "name_uz"
+          }
+        }
+      }
+    },
+    "degree": {
+      "@source": "department_military_degree[current_degree: 1]",
+      "@fields": {
+        "id": "id",
+        "degree_given_time": "TO_CHAR(TO_TIMESTAMP(degree_given_time), 'DD.MM.YYYY')"
+      },
+      "0": {
+        "@source": "military_degree[status: 1]",
+        "@flatten": true,
+        "@fields": {
+          "name": "name_uz"
+        }
       }
     }
   }
@@ -203,10 +209,12 @@ Engine avtomatik `emp → dept → dept_basic → org` yo'lini topadi va barcha 
 **Frontend (sodda, tekis tuzilma):**
 ```json
 {
-  "@source": "emp[status: 1]",
-  "@fields": { "id": "id" },
-  "viloyat": { "@source": "org[status: 1]", "@fields": { "name": "name_uz" } },
-  "tuman":   { "@source": "inner_org[status: 1]", "@fields": { "name": "name_uz" } }
+  "@data[]": {
+    "@source": "emp[status: 1]",
+    "@fields": { "id": "id" },
+    "viloyat": { "@source": "org[status: 1]", "@fields": { "name": "name_uz" } },
+    "tuman":   { "@source": "inner_org[status: 1]", "@fields": { "name": "name_uz" } }
+  }
 }
 ```
 
@@ -230,17 +238,17 @@ Kutubxona frontend dasturchilar yoki backend middleware interfeyschilar uchun **
 ```
 Bunday json yuborilganda Engine normal parser ishlashini to'xtatadi va shunday natija qaytaradi:
 1. `"sql"` parametriga Frontendga qulay bo'lishi uchun Whitelist xaritasidagi tiplarni topuvchi katta PostgreSQL CTE querysini joylaydi.
-2. `"structure": { "relations": [...] }` ro'yxatida Relations ro'yxatining kalitlarini jo'natadi.
+2. `{ "tables": {...} "relations": [...] }` ro'yxatida quyidagicha ro'yxatini jo'natadi.
 
 ---
 
 ## 4. Core Engine Architecture
 
 ### 4.1. Parser (`parser.rs`)
-- JSON ni tahlil qilib `QueryNode` daraxtini tuzadi
-- `@source` ichidan jadval nomi, filtrlar, `$limit`, `$order`, `$offset` ni ajratib oladi
-- `[]` bilan tugaydigan kalit nomlarni `is_list: true` deb belgilaydi
-- Eski format (`@data` + `@config`) ham qo'llab-quvvatlanadi (backward compatibility)
+- JSON ni tahlil qilib root node sifatida `@info`, `@data`, yoki `@data[]` dan birining mavjudligini qat'iy tekshiradi.
+- `QueryNode` daraxtini tuzadi.
+- `@source` ichidan jadval nomi, filtrlar, `$limit`, `$order`, `$offset` ni ajratib oladi.
+- `[]` bilan tugaydigan kalit nomlarni `is_list: true` deb belgilaydi.
 
 ### 4.2. SQL Generator (`generator.rs`)
 - `QueryNode` daraxtini PostgreSQL `json_build_object` va `json_agg` yordamida SQL ga aylantiradi

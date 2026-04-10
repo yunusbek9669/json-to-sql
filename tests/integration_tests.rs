@@ -9,25 +9,27 @@ use json_to_sql::{uaq_parse, uaq_free_string};
 fn test_compact_format() {
     // New compact format: no @data/@config wrappers
     let json_input = r#"{
-        "@source": "personal[status: 'active', age: 25..45, $limit: 15, $order: personal.id DESC]",
-        "@fields": {
-            "id": "id",
-            "full_name": "CONCAT(last_name_latin, ' ', first_name_latin)",
-            "passport": "jshshir"
-        },
-        "organization": {
-            "@source": "org",
+        "@data[]": {
+            "@source": "personal[status: 'active', age: 25..45, $limit: 15, $order: personal.id DESC]",
             "@fields": {
-                "name": "name_uz",
-                "code": "code"
-            }
-        },
-        "position_info": {
-            "@source": "pos[rank_id: in (1, 2, 3)]",
-            "@flatten": true,
-            "@fields": {
-                "title": "name_latin",
-                "is_military": "is_military_rank"
+                "id": "id",
+                "full_name": "CONCAT(last_name_latin, ' ', first_name_latin)",
+                "passport": "jshshir"
+            },
+            "organization": {
+                "@source": "org",
+                "@fields": {
+                    "name": "name_uz",
+                    "code": "code"
+                }
+            },
+            "position_info": {
+                "@source": "pos[rank_id: in (1, 2, 3)]",
+                "@flatten": true,
+                "@fields": {
+                    "title": "name_latin",
+                    "is_military": "is_military_rank"
+                }
             }
         }
     }"#;
@@ -62,15 +64,17 @@ fn test_compact_format() {
 fn test_alias_format() {
     // Frontend uses aliases defined in whitelist
     let json_input = r#"{
-        "@source": "emp[status: 1, $limit: 5]",
-        "@fields": {
-            "id": "id",
-            "full_name": "CONCAT(last_name, ' ', first_name)"
-        },
-        "boshqarma": {
-            "@source": "org[status: 1]",
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 5]",
             "@fields": {
-                "name": "name_uz"
+                "id": "id",
+                "full_name": "CONCAT(last_name, ' ', first_name)"
+            },
+            "boshqarma": {
+                "@source": "org[status: 1]",
+                "@fields": {
+                    "name": "name_uz"
+                }
             }
         }
     }"#;
@@ -102,8 +106,10 @@ fn test_alias_format() {
 fn test_alias_enforcement() {
     // Frontend tries to use real table name when alias is defined → must fail
     let json_input = r#"{
-        "@source": "employee[status: 1]",
-        "@fields": { "id": "id" }
+        "@data": {
+            "@source": "employee[status: 1]",
+            "@fields": { "id": "id" }
+        }
     }"#;
 
     let mut wl = std::collections::HashMap::new();
@@ -123,18 +129,20 @@ fn test_alias_enforcement() {
 fn test_auto_path_resolution() {
     // Frontend writes org/inner_org directly under emp — no nested structure needed!
     let json_input = r#"{
-        "@source": "emp[status: 1, $limit: 2]",
-        "@fields": {
-            "id": "id",
-            "full_name": "CONCAT(last_name, ' ', first_name)"
-        },
-        "viloyat_boshqarma": {
-            "@source": "org[status: 1]",
-            "@fields": { "name": "name_uz" }
-        },
-        "tuman_boshqarma": {
-            "@source": "inner_org[status: 1]",
-            "@fields": { "name": "name_uz" }
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 2]",
+            "@fields": {
+                "id": "id",
+                "full_name": "CONCAT(last_name, ' ', first_name)"
+            },
+            "viloyat_boshqarma": {
+                "@source": "org[status: 1]",
+                "@fields": { "name": "name_uz" }
+            },
+            "tuman_boshqarma": {
+                "@source": "inner_org[status: 1]",
+                "@fields": { "name": "name_uz" }
+            }
         }
     }"#;
 
@@ -197,18 +205,20 @@ fn test_info_endpoint() {
 #[test]
 fn test_user_complex_mapping() {
     let json_input = concat!(r#"{
-      "@source": "emp[status: 1, id: 1000..2145, $limit: 20, $order: id DESC]",
-      "@fields": {
-        "id": "id",
-        "full_name": "CONCAT(last_name, ' ', first_name)",
-        "passport": "jshshir",
-        "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
-      },
-      "0": {
-          "@source": "org[red: 1]",
-          "@flatten": true,
+      "@data[]": {
+          "@source": "emp[status: 1, id: 1000..2145, $limit: 20, $order: id DESC]",
           "@fields": {
-              "viloyat boshqarma": "name"
+            "id": "id",
+            "full_name": "CONCAT(last_name, ' ', first_name)",
+            "passport": "jshshir",
+            "birthDay": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
+          },
+          "0": {
+              "@source": "org[red: 1]",
+              "@flatten": true,
+              "@fields": {
+                  "viloyat boshqarma": "name"
+              }
           }
       }
     }"#, "\0").as_ptr() as *const c_char;

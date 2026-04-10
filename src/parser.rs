@@ -90,7 +90,16 @@ pub fn parse_json(json_str: &str) -> Result<QueryNode, String> {
     let parsed: Value = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
     
     if let Value::Object(map) = &parsed {
-        return parse_query_node("@root", map);
+        // Enforce @data or @data[]
+        if let Some(Value::Object(data_map)) = map.get("@data") {
+            return parse_query_node("@data", data_map);
+        } else if let Some(Value::Object(data_list_map)) = map.get("@data[]") {
+            return parse_query_node("@data[]", data_list_map);
+        } else if map.contains_key("@info") {
+            return Err("Expected @data or @data[], but got @info. Info requests should be handled earlier.".to_string());
+        }
+        
+        return Err("Root JSON must contain either '@data' or '@data[]' as the primary key".to_string());
     }
     
     Err("Root JSON must be an object".to_string())
