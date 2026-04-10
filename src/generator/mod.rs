@@ -24,7 +24,7 @@ pub struct SqlGenerator {
 }
 
 impl SqlGenerator {
-    pub fn new(whitelist: Option<HashMap<String, serde_json::Value>>, relations: Option<HashMap<String, String>>) -> Self {
+    pub fn new(whitelist: Option<IndexMap<String, serde_json::Value>>, relations: Option<HashMap<String, String>>) -> Self {
         let rels = relations.unwrap_or_default();
         let relation_graph = Self::build_relation_graph(&rels);
         Self {

@@ -3,13 +3,14 @@ pub mod validator;
 pub mod formatter;
 
 use std::collections::{HashMap, HashSet};
+use indexmap::{IndexMap, IndexSet};
 
 #[derive(Debug, Clone)]
 pub enum WhitelistRule {
     /// ["id", "name", "*"] 
-    Allowed(HashSet<String>),
+    Allowed(IndexSet<String>),
     /// {"unique": "id", "full_name": "CONCAT(...)"}
-    Mapping(HashMap<String, String>),
+    Mapping(IndexMap<String, String>),
 }
 
 impl WhitelistRule {
@@ -44,7 +45,7 @@ impl WhitelistRule {
 
 pub struct Guard {
     /// alias -> WhitelistRule
-    pub whitelist: Option<HashMap<String, WhitelistRule>>,
+    pub whitelist: Option<IndexMap<String, WhitelistRule>>,
     /// alias -> real_table (e.g. "org" -> "structure_organization")
     pub alias_map: HashMap<String, String>,
     /// Set of real table names that have aliases (for enforcement)
@@ -54,15 +55,15 @@ pub struct Guard {
 impl Guard {
     /// Parses whitelist keys with optional alias: "real_table:alias" -> columns
     /// Builds both whitelist (alias -> rule) and alias_map (alias -> real_table)
-    pub fn new(raw_whitelist: Option<HashMap<String, serde_json::Value>>) -> Self {
+    pub fn new(raw_whitelist: Option<IndexMap<String, serde_json::Value>>) -> Self {
         let mut alias_map = HashMap::new();
         let mut aliased_tables = HashSet::new();
         
         let whitelist = if let Some(raw) = raw_whitelist {
-            let mut clean_whitelist = HashMap::new();
+            let mut clean_whitelist = IndexMap::new();
             for (key, val) in raw {
                 let rule = if let Some(arr) = val.as_array() {
-                    let mut set = HashSet::new();
+                    let mut set = IndexSet::new();
                     for item in arr {
                         if let Some(s) = item.as_str() {
                             set.insert(s.to_string());
@@ -70,7 +71,7 @@ impl Guard {
                     }
                     WhitelistRule::Allowed(set)
                 } else if let Some(obj) = val.as_object() {
-                    let mut map = HashMap::new();
+                    let mut map = IndexMap::new();
                     for (k, v) in obj {
                         if let Some(s) = v.as_str() {
                             map.insert(k.to_string(), s.to_string());
@@ -78,7 +79,7 @@ impl Guard {
                     }
                     WhitelistRule::Mapping(map)
                 } else {
-                    WhitelistRule::Allowed(HashSet::new())
+                    WhitelistRule::Allowed(IndexSet::new())
                 };
 
                 if let Some((real_table, alias)) = key.split_once(':') {

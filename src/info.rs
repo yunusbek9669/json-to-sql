@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 pub fn process_info_request(
@@ -14,7 +14,7 @@ pub fn process_info_request(
 
     if is_relations && relations_str.is_some() {
         let rel_str = relations_str.unwrap_or("{}");
-        let rel_map: HashMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
+        let rel_map: IndexMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
         let keys: Vec<String> = rel_map.keys().cloned().collect();
         included_relations = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
         info_result.insert("relations".to_string(), json!(keys));

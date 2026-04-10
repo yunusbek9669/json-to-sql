@@ -80,10 +80,53 @@ impl SqlGenerator {
         
         // Add fields belonging to this node's alias
         for (field_key, field_sql) in &node.fields {
-            self.guard.validate_field(&current_alias, field_sql)?;
-            let expanded = self.guard.expand_mapped_fields(field_sql, &current_alias);
-            let processed = Guard::auto_prefix_field(&expanded, &current_alias);
-            json_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
+            if field_sql == "*" {
+                // If "*" is used, expand based on whitelist if available
+                let mut expanded_fields = Vec::new();
+                let mut use_row_to_json = false;
+
+                if let Some(wl) = &self.guard.whitelist {
+                    if let Some(rule) = wl.get(&current_alias) {
+                        if rule.is_allowed("*") {
+                            // Globally allowed, fallback to row_to_json
+                            use_row_to_json = true;
+                        } else {
+                            // Expand the explicitly mapped/allowed fields
+                            match rule {
+                                crate::guard::WhitelistRule::Mapping(map) => {
+                                    for (k, v) in map {
+                                        expanded_fields.push((k.clone(), v.clone()));
+                                    }
+                                },
+                                crate::guard::WhitelistRule::Allowed(set) => {
+                                    for k in set {
+                                        expanded_fields.push((k.clone(), k.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(format!("Table '{}' not in whitelist", current_alias));
+                    }
+                } else {
+                    use_row_to_json = true;
+                }
+
+                if use_row_to_json {
+                    json_args.push(format!("'{}', row_to_json({})", escape_sql_key(field_key), current_alias));
+                } else {
+                    for (k, sql_val) in expanded_fields {
+                        let expanded = self.guard.expand_mapped_fields(&sql_val, &current_alias);
+                        let processed = Guard::auto_prefix_field(&expanded, &current_alias);
+                        json_args.push(format!("'{}', {}", escape_sql_key(&k), processed));
+                    }
+                }
+            } else {
+                self.guard.validate_field(&current_alias, field_sql)?;
+                let expanded = self.guard.expand_mapped_fields(field_sql, &current_alias);
+                let processed = Guard::auto_prefix_field(&expanded, &current_alias);
+                json_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
+            }
         }
         
         // Process children

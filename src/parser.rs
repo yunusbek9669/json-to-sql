@@ -148,6 +148,12 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
                             node.fields.insert(fk.clone(), fvs.clone());
                         }
                     }
+                } else if let Value::Array(arr) = v {
+                    for item in arr {
+                        if let Value::String(s) = item {
+                            node.fields.insert(s.clone(), s.clone());
+                        }
+                    }
                 }
             }
             "@flatten" => {

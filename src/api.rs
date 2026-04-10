@@ -7,6 +7,8 @@ use crate::parser;
 use crate::generator;
 use crate::info; // from info.rs
 
+use indexmap::IndexMap;
+
 /// Parses a declarative JSON string and returns a parameterized SQL JSON result.
 /// 
 /// Returns a heap-allocated C string. Ownership is transferred to the caller.
@@ -46,7 +48,7 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         return encode_result(result);
     }
 
-    let whitelist: Option<HashMap<String, serde_json::Value>> = if let Some(s) = whitelist_str {
+    let whitelist: Option<IndexMap<String, serde_json::Value>> = if let Some(s) = whitelist_str {
         if s.trim().is_empty() {
              None
         } else {
