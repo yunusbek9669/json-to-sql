@@ -86,51 +86,10 @@ fn parse_operator_and_value(input: &str) -> (String, String) {
 }
 
 /// Parses the top-level JSON into a single root QueryNode.
-/// Supports both new compact format (root is the node itself) and
-/// legacy format with @data/@config wrappers.
 pub fn parse_json(json_str: &str) -> Result<QueryNode, String> {
     let parsed: Value = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
     
     if let Value::Object(map) = &parsed {
-        // Check if this is legacy format with @data wrapper
-        if let Some(Value::Object(data_map)) = map.get("@data") {
-            // Legacy format: merge @config into the @data node's @source
-            let mut root_map = data_map.clone();
-            
-            // If there's a top-level @config, merge $limit/$order/$offset into @source
-            if let Some(Value::Object(cfg)) = map.get("@config") {
-                if let Some(Value::String(source_str)) = root_map.get("@source") {
-                    let mut new_source = source_str.clone();
-                    let mut extras = Vec::new();
-                    
-                    if let Some(Value::Number(l)) = cfg.get("limit") {
-                        extras.push(format!("$limit: {}", l));
-                    }
-                    if let Some(Value::Number(o)) = cfg.get("offset") {
-                        extras.push(format!("$offset: {}", o));
-                    }
-                    if let Some(Value::String(o)) = cfg.get("order") {
-                        extras.push(format!("$order: {}", o));
-                    }
-                    
-                    if !extras.is_empty() {
-                        // Inject into existing brackets or add new ones
-                        if new_source.contains('[') {
-                            // Insert before closing bracket
-                            let close_pos = new_source.rfind(']').unwrap();
-                            new_source.insert_str(close_pos, &format!(", {}", extras.join(", ")));
-                        } else {
-                            new_source.push_str(&format!("[{}]", extras.join(", ")));
-                        }
-                        root_map.insert("@source".to_string(), Value::String(new_source));
-                    }
-                }
-            }
-            
-            return parse_query_node("@data", &root_map);
-        }
-        
-        // New compact format: root JSON IS the node
         return parse_query_node("@root", map);
     }
     
