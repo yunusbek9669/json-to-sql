@@ -183,16 +183,12 @@ fn test_info_endpoint() {
     assert_eq!(result_json["isOk"], true);
     assert_eq!(result_json["message"], "info");
     
-    let structure = result_json["structure"].as_object().unwrap();
-    assert!(structure.contains_key("sql"));
-    assert!(structure.contains_key("relations"));
-    
-    // Also check root sql property
+    // sql and relations are now at root level, not nested in structure
     let sql = result_json["sql"].as_str().unwrap();
     assert!(sql.contains("WITH input_json AS"));
     assert!(sql.contains("CONCAT(name)"));
     
-    let rels = structure["relations"].as_array().unwrap();
+    let rels = result_json["relations"].as_array().unwrap();
     assert_eq!(rels.len(), 2);
     
     uaq_free_string(result_ptr);

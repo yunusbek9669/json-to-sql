@@ -41,9 +41,7 @@ impl SqlGenerator {
     }
 
     pub fn generate(mut self, root: QueryNode) -> Result<ParseResult, String> {
-        let mut root_structure = serde_json::Map::new();
-        
-        let child_args = self.process_node(&root, None, &mut root_structure)?;
+        let child_args = self.process_node(&root, None)?;
         let json_obj_expr = format!("json_build_object({})", child_args.join(", "));
         
         // BASE SQL Construction
@@ -100,7 +98,6 @@ impl SqlGenerator {
             is_ok: true,
             sql: Some(final_sql),
             params: Some(self.params),
-            structure: Some(Value::Object(root_structure)),
             message: "success".to_string(),
         })
     }

@@ -106,7 +106,6 @@ pub(crate) fn create_error_result(msg: &str) -> *mut c_char {
         "isOk": false,
         "sql": null,
         "params": null,
-        "structure": null,
         "message": msg
     });
     encode_result(err_json)

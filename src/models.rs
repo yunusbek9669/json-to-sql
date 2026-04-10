@@ -41,6 +41,5 @@ pub struct ParseResult {
     pub is_ok: bool,
     pub sql: Option<String>,
     pub params: Option<IndexMap<String, Value>>,
-    pub structure: Option<Value>,
     pub message: String,
 }

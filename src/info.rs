@@ -120,12 +120,14 @@ SELECT jsonb_build_object(
         "isOk": true,
         "sql": null,
         "params": null,
-        "structure": info_result.clone(),
         "message": "info"
     });
     
     if let Some(sql_val) = info_result.get("sql") {
         result["sql"] = sql_val.clone();
+    }
+    if let Some(rels_val) = info_result.get("relations") {
+        result["relations"] = rels_val.clone();
     }
     
     result

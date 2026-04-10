@@ -268,12 +268,6 @@ Bunday json yuborilganda Engine normal parser ishlashini to'xtatadi va shunday n
   "params": {
     "p1": "1"
   },
-  "structure": {
-    "id": "employee.id",
-    "full_name": "CONCAT(...)",
-    "boshqarma": { "name": "structure_organization.name_uz" },
-    "positions": { "_type": "array", "id": "..." }
-  },
   "message": "success"
 }
 ```
@@ -284,7 +278,6 @@ Bunday json yuborilganda Engine normal parser ishlashini to'xtatadi va shunday n
   "isOk": false,
   "sql": null,
   "params": null,
-  "structure": null,
   "message": "Generation Error: No relation defined for employee->unknown_table"
 }
 ```

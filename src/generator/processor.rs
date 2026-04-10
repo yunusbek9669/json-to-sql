@@ -1,4 +1,3 @@
-use serde_json::{json, Value};
 use crate::models::QueryNode;
 use crate::guard::Guard;
 use super::relation::extract_on_condition;
@@ -6,11 +5,10 @@ use super::SqlGenerator;
 
 pub(crate) struct LateralResult {
     pub sql: String,
-    pub structure: serde_json::Map<String, Value>,
 }
 
 impl SqlGenerator {
-    pub(crate) fn process_node(&mut self, node: &QueryNode, parent_table: Option<(&str, &str)>, structure: &mut serde_json::Map<String, Value>) -> Result<Vec<String>, String> {
+    pub(crate) fn process_node(&mut self, node: &QueryNode, parent_table: Option<(&str, &str)>) -> Result<Vec<String>, String> {
         // source_name = original name from frontend (alias), real_table = resolved real DB name
         let (source_name, real_table) = if let Some(source) = &node.source {
             let real = self.guard.resolve_alias(&source.table_name)?;
@@ -81,8 +79,6 @@ impl SqlGenerator {
             let expanded_field = self.guard.expand_mapped_fields(field_sql, &source_name);
             let processed_field = Guard::auto_prefix_field(&expanded_field, &source_name);
             json_object_args.push(format!("'{}', {}", field_key, processed_field));
-            
-            structure.insert(field_key.to_string(), json!(processed_field));
         }
         
         // Process children recursively
@@ -98,25 +94,13 @@ impl SqlGenerator {
                 ));
                 
                 json_object_args.push(format!("'{}', {}.array_data", child.name, lateral_alias));
-                
-                let mut child_struct = serde_json::Map::new();
-                child_struct.insert("_type".to_string(), json!("array"));
-                for (k, v) in list_result.structure {
-                    child_struct.insert(k, v);
-                }
-                structure.insert(child.name.clone(), Value::Object(child_struct));
             } else {
-                let mut child_struct = serde_json::Map::new();
-                let child_args = self.process_node(child, Some((&source_name, &real_table)), &mut child_struct)?;
+                let child_args = self.process_node(child, Some((&source_name, &real_table)))?;
                 
                 if child.flatten {
                     json_object_args.extend(child_args);
-                    for (k, v) in child_struct {
-                        structure.insert(k, v);
-                    }
                 } else {
                     json_object_args.push(format!("'{}', json_build_object({})", child.name, child_args.join(", ")));
-                    structure.insert(child.name.clone(), Value::Object(child_struct));
                 }
             }
         }
@@ -135,14 +119,12 @@ impl SqlGenerator {
         
         // Build the inner json_build_object fields
         let mut inner_args = Vec::new();
-        let mut inner_structure = serde_json::Map::new();
         
         for (field_key, field_sql) in &node.fields {
             self.guard.validate_field(child_alias, field_sql)?;
             let expanded_field = self.guard.expand_mapped_fields(field_sql, child_alias);
             let processed = Guard::auto_prefix_field(&expanded_field, child_alias);
             inner_args.push(format!("'{}', {}", field_key, processed));
-            inner_structure.insert(field_key.to_string(), json!(processed));
         }
         
         // Build inner joins and where for children of the list node
@@ -150,7 +132,7 @@ impl SqlGenerator {
         let mut inner_wheres = Vec::new();
         
         // Recursively collect flatten children fields
-        self.collect_list_children(node, child_alias, &real_table, &mut inner_args, &mut inner_joins, &mut inner_wheres, &mut inner_structure)?;
+        self.collect_list_children(node, child_alias, &real_table, &mut inner_args, &mut inner_joins, &mut inner_wheres)?;
         
         let json_obj = format!("json_build_object({})", inner_args.join(", "));
         
@@ -205,7 +187,7 @@ impl SqlGenerator {
             inner_sql
         );
         
-        Ok(LateralResult { sql, structure: inner_structure })
+        Ok(LateralResult { sql })
     }
     
     /// Recursively collect flatten children of a list node
@@ -217,7 +199,6 @@ impl SqlGenerator {
         args: &mut Vec<String>,
         joins: &mut Vec<String>,
         wheres: &mut Vec<String>,
-        structure: &mut serde_json::Map<String, Value>,
     ) -> Result<(), String> {
         for child in &node.children {
             let child_source = child.source.as_ref();
@@ -254,18 +235,11 @@ impl SqlGenerator {
                     self.guard.validate_field(child_alias_name, fv)?;
                     let expanded_field = self.guard.expand_mapped_fields(fv, child_alias_name);
                     let processed = Guard::auto_prefix_field(&expanded_field, child_alias_name);
-                    
-                    if child.flatten {
-                        args.push(format!("'{}', {}", fk, processed));
-                        structure.insert(fk.to_string(), json!(processed));
-                    } else {
-                        args.push(format!("'{}', {}", fk, processed));
-                        structure.insert(fk.to_string(), json!(processed));
-                    }
+                    args.push(format!("'{}', {}", fk, processed));
                 }
                 
                 // Recurse for deeper children
-                self.collect_list_children(child, child_alias_name, &child_real, args, joins, wheres, structure)?;
+                self.collect_list_children(child, child_alias_name, &child_real, args, joins, wheres)?;
             }
         }
         Ok(())
