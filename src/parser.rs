@@ -85,16 +85,36 @@ fn parse_operator_and_value(input: &str) -> (String, String) {
     }
 }
 
+// Helper for deep merging JSON objects
+fn merge_json_objects(base: &mut serde_json::Map<String, Value>, override_map: &serde_json::Map<String, Value>) {
+    for (k, v) in override_map {
+        if k == "@extend" { continue; }
+        
+        let base_val = base.remove(k);
+        match (base_val, v) {
+            (Some(Value::Object(mut base_obj)), Value::Object(override_obj)) => {
+                merge_json_objects(&mut base_obj, override_obj);
+                base.insert(k.clone(), Value::Object(base_obj));
+            }
+            (_, _) => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 /// Parses the top-level JSON into a single root QueryNode.
-pub fn parse_json(json_str: &str) -> Result<QueryNode, String> {
+pub fn parse_json(json_str: &str, external_macros: Option<&IndexMap<String, Value>>) -> Result<QueryNode, String> {
     let parsed: Value = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
     
     if let Value::Object(map) = &parsed {
-        // Enforce @data or @data[]
+        let empty_macros = IndexMap::new();
+        let macros = external_macros.unwrap_or(&empty_macros);
+
         if let Some(Value::Object(data_map)) = map.get("@data") {
-            return parse_query_node("@data", data_map);
+            return parse_query_node("@data", data_map, macros);
         } else if let Some(Value::Object(data_list_map)) = map.get("@data[]") {
-            return parse_query_node("@data[]", data_list_map);
+            return parse_query_node("@data[]", data_list_map, macros);
         } else if map.contains_key("@info") {
             return Err("Expected @data or @data[], but got @info. Info requests should be handled earlier.".to_string());
         }
@@ -105,8 +125,33 @@ pub fn parse_json(json_str: &str) -> Result<QueryNode, String> {
     Err("Root JSON must be an object".to_string())
 }
 
-fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<QueryNode, String> {
-    // Detect [] suffix for list nodes
+fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &IndexMap<String, Value>) -> Result<QueryNode, String> {
+    let mut working_map = map.clone();
+
+    // Macro expansion
+    let mut macro_name_opt = None;
+    
+    if let Some(Value::String(m)) = working_map.get("@extend") {
+        macro_name_opt = Some(m.clone());
+    } else if let Some(Value::String(s)) = working_map.get("@source") {
+        let base_name = s.split('[').next().unwrap_or(s).trim();
+        if macros.contains_key(base_name) {
+            macro_name_opt = Some(base_name.to_string());
+            // Remove the macro @source from the overrides so it doesn't overwrite the real macro source table
+            working_map.remove("@source");
+        }
+    }
+
+    if let Some(macro_name) = macro_name_opt {
+        if let Some(Value::Object(macro_def)) = macros.get(&macro_name) {
+            let mut merged = macro_def.clone();
+            merge_json_objects(&mut merged, &working_map);
+            working_map = merged;
+        } else {
+            return Err(format!("Macro/VirtualTable '{}' not found in macros", macro_name));
+        }
+    }
+
     let (clean_name, is_list) = if name.ends_with("[]") {
         (name.trim_end_matches("[]").to_string(), true)
     } else {
@@ -124,7 +169,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
         mode: None,
     };
     
-    for (k, v) in map {
+    for (k, v) in &working_map {
         match k.as_str() {
             "@source" => {
                 if let Value::String(s) = v {
@@ -161,10 +206,13 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
                     node.flatten = *b;
                 }
             }
+            "@extend" => {
+                // Already processed above
+            }
             _ => {
                 if !k.starts_with('@') {
                     if let Value::Object(child_map) = v {
-                        let child = parse_query_node(k, child_map)?;
+                        let child = parse_query_node(k, child_map, macros)?;
                         node.children.push(child);
                     } else if let Value::Array(arr) = v {
                         // Create a structural wrapper node for the array
@@ -183,7 +231,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
                         for (idx, item) in arr.iter().enumerate() {
                             if let Value::Object(item_map) = item {
                                 let child_name = idx.to_string();
-                                let child = parse_query_node(&child_name, item_map)?;
+                                let child = parse_query_node(&child_name, item_map, macros)?;
                                 wrapper.children.push(child);
                             }
                         }

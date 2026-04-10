@@ -34,7 +34,7 @@ fn test_compact_format() {
         }
     }"#;
 
-    let root = parser::parse_json(json_input).expect("Should parse");
+    let root = parser::parse_json(json_input, None).expect("Should parse");
     
     // Verify $limit and $order were parsed
     assert_eq!(root.source.as_ref().unwrap().limit, Some(15));
@@ -80,7 +80,7 @@ fn test_alias_format() {
     }"#;
 
     // Whitelist with aliases: "real_table:alias"
-    let mut wl = std::collections::HashMap::new();
+    let mut wl = indexmap::IndexMap::new();
     wl.insert("employee:emp".to_string(), json!(["id", "last_name", "first_name", "status", "organization_id"]));
     wl.insert("structure_organization:org".to_string(), json!(["*"]));
 
@@ -88,7 +88,7 @@ fn test_alias_format() {
     let mut rels = std::collections::HashMap::new();
     rels.insert("emp<->org".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
 
-    let root = parser::parse_json(json_input).expect("Should parse alias format");
+    let root = parser::parse_json(json_input, None).expect("Should parse alias format");
     let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));
     let result = gen_inst.generate(root).expect("Should generate with aliases");
 
@@ -112,10 +112,10 @@ fn test_alias_enforcement() {
         }
     }"#;
 
-    let mut wl = std::collections::HashMap::new();
+    let mut wl = indexmap::IndexMap::new();
     wl.insert("employee:emp".to_string(), json!(["*"]));
 
-    let root = parser::parse_json(json_input).expect("Should parse");
+    let root = parser::parse_json(json_input, None).expect("Should parse");
     let gen_inst = generator::SqlGenerator::new(Some(wl), None);
     let result = gen_inst.generate(root);
     
@@ -146,7 +146,7 @@ fn test_auto_path_resolution() {
         }
     }"#;
 
-    let mut wl = std::collections::HashMap::new();
+    let mut wl = indexmap::IndexMap::new();
     wl.insert("employee:emp".to_string(), json!(["*"]));
     wl.insert("employee_department_staff_position:dept".to_string(), json!(["*"]));
     wl.insert("shtat_department_basic:dept_basic".to_string(), json!(["*"]));
@@ -159,7 +159,7 @@ fn test_auto_path_resolution() {
     rels.insert("dept_basic<->org".to_string(), "INNER JOIN @table ON @1.organization_id = @2.id".to_string());
     rels.insert("dept_basic<->inner_org".to_string(), "INNER JOIN @table ON @1.command_organization_id = @2.id".to_string());
 
-    let root = parser::parse_json(json_input).expect("Should parse");
+    let root = parser::parse_json(json_input, None).expect("Should parse");
     let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));
     let result = gen_inst.generate(root).expect("Auto-path should work");
 
@@ -180,7 +180,7 @@ fn test_info_endpoint() {
     let whitelist_input = "{\"employee:emp\": {\"unique\": \"id\", \"full_name\": \"CONCAT(name)\"}, \"org\": [\"*\"]}\0".as_ptr() as *const c_char;
     let relations_input = "{\"emp->org\": \"JOIN\", \"org->dept\": \"JOIN\"}\0".as_ptr() as *const c_char;
 
-    let result_ptr = uaq_parse(json_input, whitelist_input, relations_input);
+    let result_ptr = uaq_parse(json_input, whitelist_input, relations_input, std::ptr::null());
     assert!(!result_ptr.is_null());
 
     let c_str = unsafe { CStr::from_ptr(result_ptr) };
@@ -242,7 +242,7 @@ fn test_user_complex_mapping() {
       "department_basic<->inner_org": "INNER JOIN @table ON @1.command_organization_id = @2.id AND @1.status = 1"
     }"#, "\0").as_ptr() as *const c_char;
 
-    let result_ptr = uaq_parse(json_input, whitelist_input, relations_input);
+    let result_ptr = uaq_parse(json_input, whitelist_input, relations_input, std::ptr::null());
     assert!(!result_ptr.is_null());
 
     let c_str = unsafe { CStr::from_ptr(result_ptr) };

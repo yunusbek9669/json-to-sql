@@ -73,7 +73,7 @@ impl Guard {
         result
     }
 
-    pub fn auto_prefix_field(field_sql: &str, table_alias: &str) -> String {
+    pub fn auto_prefix_field(field_sql: &str, table_alias: &str, local_aliases: Option<&std::collections::HashMap<String, String>>) -> String {
         let builtins = vec![
             "CONCAT", "CONCAT_WS", "SUBSTR", "SUBSTRING", "LEFT", "RIGHT", "REPLACE", "UPPER", "LOWER", 
             "TRIM", "LTRIM", "RTRIM", "LENGTH", "CHAR_LENGTH", "POSITION", "COUNT", "SUM", "AVG", "MAX", 
@@ -110,15 +110,25 @@ impl Guard {
                 current_word.push(c);
             } else {
                 if !current_word.is_empty() {
-                    let is_numeric = current_word.parse::<f64>().is_ok();
-                    let is_builtin = builtins.contains(&current_word.to_uppercase().as_str());
-                    let has_dot_after = c == '.';
-                    let has_dot_before = result.ends_with('.');
+                    let mut mapped = false;
+                    if let Some(aliases) = local_aliases {
+                        if let Some(target) = aliases.get(&current_word) {
+                            result.push_str(target);
+                            mapped = true;
+                        }
+                    }
                     
-                    if !is_numeric && !is_builtin && !has_dot_after && !has_dot_before {
-                        result.push_str(&format!("{}.{}", table_alias, current_word));
-                    } else {
-                        result.push_str(&current_word);
+                    if !mapped {
+                        let is_numeric = current_word.parse::<f64>().is_ok();
+                        let is_builtin = builtins.contains(&current_word.to_uppercase().as_str());
+                        let has_dot_after = c == '.';
+                        let has_dot_before = result.ends_with('.');
+                        
+                        if !is_numeric && !is_builtin && !has_dot_after && !has_dot_before {
+                            result.push_str(&format!("{}.{}", table_alias, current_word));
+                        } else {
+                            result.push_str(&current_word);
+                        }
                     }
                     current_word.clear();
                 }
@@ -128,14 +138,24 @@ impl Guard {
         }
         
         if !current_word.is_empty() {
-            let is_numeric = current_word.parse::<f64>().is_ok();
-            let is_builtin = builtins.contains(&current_word.to_uppercase().as_str());
-            let has_dot_before = result.ends_with('.');
+            let mut mapped = false;
+            if let Some(aliases) = local_aliases {
+                if let Some(target) = aliases.get(&current_word) {
+                    result.push_str(target);
+                    mapped = true;
+                }
+            }
             
-            if !is_numeric && !is_builtin && !has_dot_before {
-                result.push_str(&format!("{}.{}", table_alias, current_word));
-            } else {
-                result.push_str(&current_word);
+            if !mapped {
+                let is_numeric = current_word.parse::<f64>().is_ok();
+                let is_builtin = builtins.contains(&current_word.to_uppercase().as_str());
+                let has_dot_before = result.ends_with('.');
+                
+                if !is_numeric && !is_builtin && !has_dot_before {
+                    result.push_str(&format!("{}.{}", table_alias, current_word));
+                } else {
+                    result.push_str(&current_word);
+                }
             }
         }
         

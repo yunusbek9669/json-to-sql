@@ -8,7 +8,7 @@ impl SqlGenerator {
         self.guard.validate_column(table_alias, &filter.field)?;
         
         let expanded_field = self.guard.expand_mapped_fields(&filter.field, table_alias);
-        let column_ref = Guard::auto_prefix_field(&expanded_field, table_alias);
+        let column_ref = Guard::auto_prefix_field(&expanded_field, table_alias, None);
         
         match filter.operator.as_str() {
             "eq" => {

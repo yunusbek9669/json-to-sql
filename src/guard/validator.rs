@@ -46,7 +46,7 @@ impl Guard {
         Ok(())
     }
 
-    pub fn validate_field(&self, context: &str, field: &str) -> Result<(), String> {
+    pub fn validate_field(&self, context: &str, field: &str, local_aliases: Option<&std::collections::HashMap<String, String>>) -> Result<(), String> {
         Self::check_global_threats(field)?;
         let field_upper = field.trim().to_uppercase();
         
@@ -72,6 +72,11 @@ impl Guard {
                         let ident = m.as_str();
                         if builtins.contains(&ident.to_uppercase().as_str()) { continue; }
                         if ident.parse::<f64>().is_ok() { continue; }
+                        
+                        // If it's a locally aliased macro field, allow it
+                        if let Some(aliases) = local_aliases {
+                            if aliases.contains_key(ident) { continue; }
+                        }
                         
                         // Strip potential prefix to match whitelist directly
                         let clean_ident = if let Some((_, col)) = ident.split_once('.') { col } else { ident };
@@ -106,6 +111,11 @@ impl Guard {
             // 3. Allow constants or identifiers
             if (field.starts_with('\'') && field.ends_with('\'')) || field.parse::<f64>().is_ok() {
                 return Ok(());
+            }
+            if let Some(aliases) = local_aliases {
+                if aliases.contains_key(field) {
+                    return Ok(());
+                }
             }
             self.validate_column(context, field)?; 
         }

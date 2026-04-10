@@ -56,9 +56,9 @@ fn test_manual() {
     }
 }"#;
     
-    let root = parser::parse_json(json_input).expect("Should parse");
+    let root = parser::parse_json(json_input, None).expect("Should parse");
     
-    let mut wl = std::collections::HashMap::new();
+    let mut wl = std::collections::IndexMap::new();
     wl.insert("emp".to_string(), serde_json::json!(["*"]));
     wl.insert("departmentStaffPosition".to_string(), serde_json::json!(["*"]));
     wl.insert("org".to_string(), serde_json::json!(["*"]));
@@ -67,7 +67,7 @@ fn test_manual() {
     wl.insert("staffPositionBasic".to_string(), serde_json::json!(["*"]));
     wl.insert("staffPosition".to_string(), serde_json::json!(["*"]));
     
-    let mut rels = std::collections::HashMap::new();
+    let mut rels = std::collections::IndexMap::new();
     rels.insert("emp->departmentStaffPosition".to_string(), "LEFT JOIN @table ON @1.a=@2.b".to_string());
     rels.insert("departmentStaffPosition<->org".to_string(), "LEFT JOIN @table ON @1.c=@2.d".to_string());
     rels.insert("departmentStaffPosition<->innerOrg".to_string(), "LEFT JOIN @table ON @1.c=@2.d".to_string());

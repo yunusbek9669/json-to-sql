@@ -76,6 +76,24 @@ impl SqlGenerator {
             }
         }
         
+        let mut local_aliases = std::collections::HashMap::new();
+        for child in &node.children {
+            if child.flatten && !child.is_list {
+                let c_alias = child.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or(child.name.as_str());
+                for (f_k, f_v) in &child.fields {
+                    if f_v != "*" {
+                        let expanded_f_v = self.guard.expand_mapped_fields(f_v, c_alias);
+                        let processed = Guard::auto_prefix_field(&expanded_f_v, c_alias, None);
+                        local_aliases.insert(f_k.clone(), processed);
+                    }
+                }
+            }
+        }
+        
+        let local_aliases_opt = if local_aliases.is_empty() { None } else { Some(&local_aliases) };
+
+        let has_star = node.fields.values().any(|v| v == "*");
+
         let mut json_args = Vec::new();
         
         // Add fields belonging to this node's alias
@@ -117,14 +135,14 @@ impl SqlGenerator {
                 } else {
                     for (k, sql_val) in expanded_fields {
                         let expanded = self.guard.expand_mapped_fields(&sql_val, &current_alias);
-                        let processed = Guard::auto_prefix_field(&expanded, &current_alias);
+                        let processed = Guard::auto_prefix_field(&expanded, &current_alias, local_aliases_opt);
                         json_args.push(format!("'{}', {}", escape_sql_key(&k), processed));
                     }
                 }
             } else {
-                self.guard.validate_field(&current_alias, field_sql)?;
+                self.guard.validate_field(&current_alias, field_sql, local_aliases_opt)?;
                 let expanded = self.guard.expand_mapped_fields(field_sql, &current_alias);
-                let processed = Guard::auto_prefix_field(&expanded, &current_alias);
+                let processed = Guard::auto_prefix_field(&expanded, &current_alias, local_aliases_opt);
                 json_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
             }
         }
@@ -142,7 +160,10 @@ impl SqlGenerator {
                 
                 if child.flatten {
                     // Merge child's fields/sub-objects into this node's JSON
-                    json_args.extend(child_args);
+                    // ONLY if the parent explicitly requested "*" default outputs, otherwise suppress implicit outputs
+                    if has_star {
+                        json_args.extend(child_args);
+                    }
                 } else {
                     // Wrap child into its own JSON object
                     // We must not lose values here: join child_args together
@@ -172,9 +193,9 @@ impl SqlGenerator {
         let mut inner_args = Vec::new();
         
         for (field_key, field_sql) in &node.fields {
-            self.guard.validate_field(child_alias, field_sql)?;
+            self.guard.validate_field(child_alias, field_sql, None)?;
             let expanded_field = self.guard.expand_mapped_fields(field_sql, child_alias);
-            let processed = Guard::auto_prefix_field(&expanded_field, child_alias);
+            let processed = Guard::auto_prefix_field(&expanded_field, child_alias, None);
             inner_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
         }
         
@@ -245,7 +266,7 @@ impl SqlGenerator {
         
         if let Some(order) = &source.order {
             if self.guard.is_safe_order_by(order).is_ok() {
-                let prefixed_order = Guard::auto_prefix_field(order, child_alias);
+                let prefixed_order = Guard::auto_prefix_field(order, child_alias, None);
                 inner_sql.push_str(&format!("\n    ORDER BY {}", prefixed_order));
             }
         }

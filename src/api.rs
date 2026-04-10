@@ -14,7 +14,12 @@ use indexmap::IndexMap;
 /// Returns a heap-allocated C string. Ownership is transferred to the caller.
 /// The caller MUST free the string using `uaq_free_string`.
 #[unsafe(no_mangle)]
-pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c_char, relations_input: *const c_char) -> *mut c_char {
+pub extern "C" fn uaq_parse(
+    json_input: *const c_char, 
+    whitelist_input: *const c_char, 
+    relations_input: *const c_char,
+    macros_input: *const c_char
+) -> *mut c_char {
     if json_input.is_null() {
         return create_error_result("Input is null");
     }
@@ -40,6 +45,12 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         None
     } else {
         unsafe { CStr::from_ptr(relations_input).to_str().ok() }
+    };
+
+    let macros_str = if macros_input.is_null() {
+        None
+    } else {
+        unsafe { CStr::from_ptr(macros_input).to_str().ok() }
     };
 
     // Check for @info request
@@ -74,7 +85,29 @@ pub extern "C" fn uaq_parse(json_input: *const c_char, whitelist_input: *const c
         None
     };
 
-    let root_node = match parser::parse_json(json_str) {
+    let macros: Option<IndexMap<String, serde_json::Value>> = if let Some(s) = macros_str {
+        let cleaned = s.trim_matches(|c: char| c.is_whitespace() || c == '\0' || c == '"' || c == '\'');
+        if cleaned.is_empty() || cleaned == "null" || cleaned == "[]" || cleaned == "{}" {
+            None
+        } else {
+            // Silently fall back to None if the backend gave invalid JSON for macros, 
+            // since macros are entirely optional. Or we can just log/error. Let's return error if it's definitively garbled.
+            match serde_json::from_str(s) {
+                Ok(m) => Some(m),
+                Err(_) => {
+                    // Try parsing cleaned version
+                    match serde_json::from_str(cleaned) {
+                        Ok(mc) => Some(mc),
+                        Err(_) => None // Optional: just gracefully return None rather than throwing a hard error if left empty
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    let root_node = match parser::parse_json(json_str, macros.as_ref()) {
         Ok(res) => res,
         Err(e) => return create_error_result(&format!("Parse Error: {}", e)),
     };
