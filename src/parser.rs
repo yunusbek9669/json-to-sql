@@ -160,6 +160,28 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>) -> Result<
                     if let Value::Object(child_map) = v {
                         let child = parse_query_node(k, child_map)?;
                         node.children.push(child);
+                    } else if let Value::Array(arr) = v {
+                        // Create a structural wrapper node for the array
+                        let mut wrapper = QueryNode {
+                            name: k.clone(),
+                            is_list: k.ends_with("[]"), // Preserve list mode if requested
+                            source: None,
+                            join: None,
+                            flatten: false,
+                            fields: IndexMap::new(),
+                            children: Vec::new(),
+                            mode: None,
+                        };
+                        
+                        // Parse each object in the array as a child with a numeric name
+                        for (idx, item) in arr.iter().enumerate() {
+                            if let Value::Object(item_map) = item {
+                                let child_name = idx.to_string();
+                                let child = parse_query_node(&child_name, item_map)?;
+                                wrapper.children.push(child);
+                            }
+                        }
+                        node.children.push(wrapper);
                     }
                 }
             }

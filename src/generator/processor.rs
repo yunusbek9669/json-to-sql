@@ -7,105 +7,113 @@ pub(crate) struct LateralResult {
     pub sql: String,
 }
 
+/// Escape single quotes for use inside SQL string literals: ' → ''
+fn escape_sql_key(key: &str) -> String {
+    key.replace('\'', "''")
+}
+
 impl SqlGenerator {
-    pub(crate) fn process_node(&mut self, node: &QueryNode, parent_table: Option<(&str, &str)>) -> Result<Vec<String>, String> {
-        // source_name = original name from frontend (alias), real_table = resolved real DB name
-        let (source_name, real_table) = if let Some(source) = &node.source {
+    pub(crate) fn process_node(&mut self, node: &QueryNode, context: Option<(&str, &str)>) -> Result<Vec<String>, String> {
+        // source_name = current alias, real_table = real DB table
+        // For structural nodes (no @source), we use the parent's context for JOINs and prefixes.
+        let (current_alias, current_real) = if let Some(source) = &node.source {
             let real = self.guard.resolve_alias(&source.table_name)?;
             (source.table_name.clone(), real)
+        } else if let Some((p_alias, p_real)) = context {
+            (p_alias.to_string(), p_real.to_string())
         } else {
             (node.name.clone(), node.name.clone())
         };
-        
+
         if let Some(source) = &node.source {
             self.guard.validate_table(&source.table_name)?;
             
-            // If parent_table is None, this is a root node -> FROM
-            if parent_table.is_none() {
-                self.froms.push(format!("{} AS {}", real_table, source_name));
-                self.joined_aliases.insert(source_name.clone());
+            if context.is_none() {
+                // Root node -> FROM clause
+                self.froms.push(format!("{} AS {}", current_real, current_alias));
+                self.joined_aliases.insert(current_alias.clone());
             } else if !node.is_list {
-                // Normal scalar child -> regular JOIN
-                // Skip if already joined (e.g., by auto-path resolution)
-                if !self.joined_aliases.contains(&source_name) {
-                    let (p_alias, p_real) = parent_table.unwrap();
+                // Non-list child -> JOIN clause
+                if !self.joined_aliases.contains(&current_alias) {
+                    let (p_alias, p_real) = context.unwrap();
 
-                    // $rel modifier: use explicit relation name for lookup
-                    let rel_name = source.rel.as_deref().unwrap_or(&node.name);
+                    // Resolve relationship hint
+                    let is_numeric = node.name.chars().all(|c| c.is_numeric());
+                    let rel_hint = if is_numeric { &source.table_name } else { &node.name };
+                    let rel_name = source.rel.as_deref().unwrap_or(rel_hint);
 
                     let j_str = if let Some(j) = &node.join {
                         Some(j.clone())
                     } else {
-                        self.resolve_relation(p_alias, &source_name, p_real, &real_table, rel_name)?
+                        self.resolve_relation(p_alias, &current_alias, p_real, &current_real, rel_name)?
                     };
 
                     if let Some(mut j) = j_str {
                         if !j.to_uppercase().contains("JOIN") {
-                            return Err(format!("Invalid JOIN syntax for {}->{}", p_alias, &source_name));
+                            return Err(format!("Invalid JOIN syntax for {}->{}", p_alias, &current_alias));
                         }
-                        // $join modifier: override JOIN type (e.g., "left" → "LEFT JOIN")
                         if let Some(jt) = &source.join_type {
                             j = Self::override_join_type(&j, jt);
                         }
                         self.joins.push(j);
-                        self.joined_aliases.insert(source_name.clone());
+                        self.joined_aliases.insert(current_alias.clone());
                     } else {
-                        // No direct relation — try auto-path resolution via BFS
-                        if let Some(path) = self.find_relation_path(p_alias, &source_name) {
+                        // BFS for auto-path
+                        if let Some(path) = self.find_relation_path(p_alias, &current_alias) {
                             self.auto_join_path(&path)?;
                         } else {
-                            return Err(format!("No @join provided and no relation path found for {}->{}", p_alias, &source_name));
+                            return Err(format!("No connection found for {}->{}", p_alias, &current_alias));
                         }
                     }
                 }
             }
-            // is_list nodes are handled separately below (LATERAL subquery)
             
-            // Process Filters (only for non-list or root nodes)
             if !node.is_list {
                 for filter in &source.filters {
-                    let condition = self.build_condition(&source_name, filter)?;
+                    let condition = self.build_condition(&current_alias, filter)?;
                     self.wheres.push(condition);
                 }
             }
         }
         
-        // Construct the parts inside JSON_OBJECT for this node
-        let mut json_object_args = Vec::new();
+        let mut json_args = Vec::new();
         
-        // Fields
+        // Add fields belonging to this node's alias
         for (field_key, field_sql) in &node.fields {
-            self.guard.validate_field(&source_name, field_sql)?;
-            let expanded_field = self.guard.expand_mapped_fields(field_sql, &source_name);
-            let processed_field = Guard::auto_prefix_field(&expanded_field, &source_name);
-            json_object_args.push(format!("'{}', {}", field_key, processed_field));
+            self.guard.validate_field(&current_alias, field_sql)?;
+            let expanded = self.guard.expand_mapped_fields(field_sql, &current_alias);
+            let processed = Guard::auto_prefix_field(&expanded, &current_alias);
+            json_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
         }
         
-        // Process children recursively
+        // Process children
         for child in &node.children {
             if child.is_list {
-                // --- LATERAL SUBQUERY for list (One-to-Many) ---
-                let list_result = self.build_lateral_subquery(child, &source_name, &real_table)?;
+                let list_result = self.build_lateral_subquery(child, &current_alias, &current_real)?;
                 let lateral_alias = format!("{}_list", child.name);
-                
-                self.joins.push(format!(
-                    "LEFT JOIN LATERAL (\n  {}\n) {} ON true",
-                    list_result.sql, lateral_alias
-                ));
-                
-                json_object_args.push(format!("'{}', {}.array_data", child.name, lateral_alias));
+                self.joins.push(format!("LEFT JOIN LATERAL (\n  {}\n) {} ON true", list_result.sql, lateral_alias));
+                json_args.push(format!("'{}', {}.array_data", escape_sql_key(&child.name), lateral_alias));
             } else {
-                let child_args = self.process_node(child, Some((&source_name, &real_table)))?;
+                // Pass current context down for structural integrity
+                let child_args = self.process_node(child, Some((&current_alias, &current_real)))?;
                 
                 if child.flatten {
-                    json_object_args.extend(child_args);
+                    // Merge child's fields/sub-objects into this node's JSON
+                    json_args.extend(child_args);
                 } else {
-                    json_object_args.push(format!("'{}', json_build_object({})", child.name, child_args.join(", ")));
+                    // Wrap child into its own JSON object
+                    // We must not lose values here: join child_args together
+                    if !child_args.is_empty() {
+                        json_args.push(format!("'{}', json_build_object({})", escape_sql_key(&child.name), child_args.join(", ")));
+                    } else {
+                        // Keep the structure even if empty
+                        json_args.push(format!("'{}', '{{}}'::json", escape_sql_key(&child.name)));
+                    }
                 }
             }
         }
         
-        Ok(json_object_args)
+        Ok(json_args)
     }
 
     /// Builds a LATERAL subquery for list (One-to-Many) nodes.
@@ -124,15 +132,39 @@ impl SqlGenerator {
             self.guard.validate_field(child_alias, field_sql)?;
             let expanded_field = self.guard.expand_mapped_fields(field_sql, child_alias);
             let processed = Guard::auto_prefix_field(&expanded_field, child_alias);
-            inner_args.push(format!("'{}', {}", field_key, processed));
+            inner_args.push(format!("'{}', {}", escape_sql_key(field_key), processed));
         }
         
         // Build inner joins and where for children of the list node
-        let mut inner_joins = Vec::new();
-        let mut inner_wheres = Vec::new();
+        // A fresh alias tracking set for the LATERAL scope
+        // Start by prepopulating with the list node's alias to avoid re-joining itself
+        let mut inner_aliases = std::collections::HashSet::new();
+        inner_aliases.insert(child_alias.to_string());
         
-        // Recursively collect flatten children fields
-        self.collect_list_children(node, child_alias, &real_table, &mut inner_args, &mut inner_joins, &mut inner_wheres)?;
+        let old_joins = std::mem::take(&mut self.joins);
+        let old_wheres = std::mem::take(&mut self.wheres);
+        let old_froms = std::mem::take(&mut self.froms);
+        let old_aliases = std::mem::replace(&mut self.joined_aliases, inner_aliases);
+        
+        // Iterate and process children recursively like a normal scoped tree
+        for child in &node.children {
+            let child_args = self.process_node(
+                child,
+                Some((child_alias, &real_table))
+            )?;
+            
+            if child.flatten {
+                inner_args.extend(child_args);
+            } else {
+                inner_args.push(format!("'{}', json_build_object({})", escape_sql_key(&child.name), child_args.join(", ")));
+            }
+        }
+        
+        // Retrieve the scoped joins and wheres
+        let inner_joins = std::mem::replace(&mut self.joins, old_joins);
+        let inner_wheres = std::mem::replace(&mut self.wheres, old_wheres);
+        self.froms = old_froms;
+        self.joined_aliases = old_aliases;
         
         let json_obj = format!("json_build_object({})", inner_args.join(", "));
         
@@ -188,60 +220,5 @@ impl SqlGenerator {
         );
         
         Ok(LateralResult { sql })
-    }
-    
-    /// Recursively collect flatten children of a list node
-    pub(crate) fn collect_list_children(
-        &mut self,
-        node: &QueryNode,
-        _parent_alias: &str,
-        _parent_real: &str,
-        args: &mut Vec<String>,
-        joins: &mut Vec<String>,
-        wheres: &mut Vec<String>,
-    ) -> Result<(), String> {
-        for child in &node.children {
-            let child_source = child.source.as_ref();
-            
-            if let Some(source) = child_source {
-                let child_alias_name = &source.table_name;
-                let child_real = self.guard.resolve_alias(&source.table_name)?;
-                self.guard.validate_table(child_alias_name)?;
-                
-                let (pa, pr) = if let Some(ns) = &node.source {
-                    (ns.table_name.clone(), self.guard.resolve_alias(&ns.table_name)?)
-                } else {
-                    (_parent_alias.to_string(), _parent_real.to_string())
-                };
-                
-                let j_str = if let Some(j) = &child.join {
-                    Some(j.clone())
-                } else {
-                    self.resolve_relation(&pa, child_alias_name, &pr, &child_real, &child.name)?
-                };
-                
-                if let Some(j) = j_str {
-                    joins.push(j);
-                } else {
-                    return Err(format!("No relation for {}->{}", pa, child_alias_name));
-                }
-                
-                for filter in &source.filters {
-                    let cond = self.build_condition(child_alias_name, filter)?;
-                    wheres.push(cond);
-                }
-                
-                for (fk, fv) in &child.fields {
-                    self.guard.validate_field(child_alias_name, fv)?;
-                    let expanded_field = self.guard.expand_mapped_fields(fv, child_alias_name);
-                    let processed = Guard::auto_prefix_field(&expanded_field, child_alias_name);
-                    args.push(format!("'{}', {}", fk, processed));
-                }
-                
-                // Recurse for deeper children
-                self.collect_list_children(child, child_alias_name, &child_real, args, joins, wheres)?;
-            }
-        }
-        Ok(())
     }
 }
