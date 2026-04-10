@@ -18,7 +18,7 @@ UAQ ishlashi uchun 4 ta asosiy qatlam mavjud:
 ## 2. Backend Integratsiyasi
 
 ### C-FFI API
-Kutubxona tashqi tillar (Node.js, PHP, Python) bilan quyidagi funksiya orqali ishlaydi:
+Kutubxona barcha mashhur tillar (Java (JNA), PHP (FFI), Node.js, Python, Go, C#) bilan quyidagi funksiya va xotirani tozalash API'si orqali ishlaydi:
 ```c
 char* uaq_parse(
     const char* json_input,     // Frontend so'rovi
@@ -26,18 +26,32 @@ char* uaq_parse(
     const char* relations_json, // Baza bo'yicha foreign key bog'lamalari
     const char* macros_json     // Ixtiyoriy: Macro-shablonlar
 );
+
+void uaq_free_string(char* s);  // Xotirada qolib ketmasligi uchun tozalash
 ```
 
 ### Whitelist Konfiguratsiyasi (Security & Mapping)
-Format: `"frontend_table_name:database_table_name"`
+Format: `"database_table_name:frontend_table_name"`
 Massiv `["*"]` berilsa so'zingsiz barcha ustunlarga ruxsat etiladi, Obyekt berilsa faqatgina xaritaga olingan ko'rsatkichlarga ruxsat beriladi va `CONCAT` kabi SQL agregatlar ruxsatdan o'tadi.
 ```json
 {
   "user_profile:profiles": ["*"],
   "employee:emp": {
     "id": "id",
-    "full_name": "CONCAT(last_name, ' ', first_name)"
-  }
+    "full_name": "CONCAT(last_name, ' ', first_name)",
+    "status": "status"
+  },
+  "organization:org": [
+    "id",
+    "name",
+    "status"
+  ],
+  "department:dep": [
+    "id",
+    "name",
+    "status"
+  ],
+  "staff_position:position": ["*"]
 }
 ```
 
@@ -53,18 +67,23 @@ Jadvallarni bir-biriga tushuntirish uchun xaritalash:
 Murakkab ierarxiyani yagona jadval sifatida e'lon qilish:
 ```json
 {
-  "VirtualPosition": {
-    "@source": "departmentStaffPosition[is_current: true]",
+  "virtualPosition": {
+    "@source": "position[is_active: true]",
     "@fields": ["*"],
-    "org": {
-      "@source": "organization[status: 1]",
+    "info": {
+      "@source": "org[status: 1]",
       "@flatten": true,
-      "@fields": { "org_name": "name" }
+      "@fields": { "organization_name": "name" },
+      "department": {
+        "@source": "dep[status: 1]",
+        "@flatten": true,
+        "@fields": { "department_name": "name" }
+      }
     }
   }
 }
 ```
-*Izoh:* `@flatten: true` - farzand jadvaldan keladigan ma'lumotlarni alohida obyekt qilib emas, ota jadvalning (departmentStaffPosition) o'ziga qo'shib yuboradi.
+*Izoh:* `@flatten: true` - farzand jadvaldan keladigan ma'lumotlarni alohida obyekt qilib emas, ota jadvalning (employee_info) o'ziga qo'shib yuboradi.
 
 ---
 
@@ -111,11 +130,16 @@ Relations configuration-da ulab qo'yilgan bo'lsa, o'zaro nom chaqirilishi kifoya
 ```json
 {
   "@data": {
-    "@source": "emp[id: 12]",
+    "@source": "profiles[id: 12, is_active: true]",
     "@fields": ["*"],
-    "positions[]": {
-      "@source": "departmentStaffPosition",
-      "@fields": ["id", "start_time"]
+    "employee_info": {
+      "@source": "emp[status: 1]",
+      "@fields": { "fullName": "full_name" },
+      "organization": {
+        "@source": "org[status: 1]",
+        "@flatten": true,
+        "@fields": { "name": "name" }
+      }
     }
   }
 }
@@ -146,13 +170,13 @@ Agar Macro ichida oldindan yozib qo'yilgan Array fieldlar (`@fields: ["*"]`) kel
 {
   "@data": {
     "position": {
-      "@source": "VirtualPosition",
+      "@source": "virtualPosition",
       "@fields": {
-         "my_custom_concat": "CONCAT(org_name, ' - ', boshqa_narsa)"
+         "my_custom_concat": "CONCAT(organization_name, ' - ', department_name)"
       }
     }
   }
 }
 ```
 **Natija:**
-Mantiq bo'yicha oldindan `id`, `status`, `is_current` chiqishi va uning orqasidan `org_name` ham flatten orqali javobga birikib ketishi belgilangan bo'lsa-da, Frontend `@fields` ga obyekti bilan aralashgani uchun faqatgina **`my_custom_concat`** ni oladi, eski ma'lumotlar e'tiborsiz qoldiriladi. Tizimda keraksiz ma'lumot ("over-fetching") bo'lmaydi.
+Mantiq bo'yicha oldindan `id`, `status`, `is_current` chiqishi va uning orqasidan `organization_name` va `department_name` ham flatten orqali javobga birikib ketishi belgilangan bo'lsa-da, Frontend `@fields` ga obyekti bilan aralashgani uchun faqatgina **`my_custom_concat`** ni oladi, eski ma'lumotlar e'tiborsiz qoldiriladi. Tizimda keraksiz ma'lumot ("over-fetching") bo'lmaydi.
