@@ -1,16 +1,25 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+
+struct TableMapping {
+    real_name: String,
+    col_map: HashMap<String, String>,
+}
 
 pub fn process_info_request(
     info_arr: &[Value],
     whitelist_str: Option<&str>,
     relations_str: Option<&str>,
+    macros_str: Option<&str>,
 ) -> Value {
     let is_tables = info_arr.iter().any(|v| v.as_str() == Some("@tables"));
     let is_relations = info_arr.iter().any(|v| v.as_str() == Some("@relations"));
     
     let mut info_result = serde_json::Map::new();
     let mut included_relations = String::from("[]");
+
+    let macros: IndexMap<String, Value> = macros_str.and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
 
     if is_relations && relations_str.is_some() {
         let rel_str = relations_str.unwrap_or("{}");
@@ -37,49 +46,97 @@ pub fn process_info_request(
 
     let sql_query = if is_tables && whitelist_str.is_some() {
         let wl_str = whitelist_str.unwrap_or("{}");
-        let wl_escaped = wl_str.replace("'", "''");
+        let wl: IndexMap<String, Value> = serde_json::from_str(wl_str).unwrap_or_default();
+        
+        // Build table alias mapping from whitelist
+        let mut table_mappings = HashMap::new();
+        for (key, val) in &wl {
+            let (real, alias) = if let Some((n, a)) = key.split_once(':') {
+                (n, a)
+            } else {
+                (key.as_str(), key.as_str())
+            };
+            
+            let mut col_map = HashMap::new();
+            if let Value::Object(obj) = val {
+                for (k, v) in obj {
+                    if let Some(v_str) = v.as_str() {
+                        col_map.insert(k.clone(), v_str.to_string());
+                    }
+                }
+            }
+            
+            table_mappings.insert(alias.to_string(), TableMapping {
+                real_name: real.to_string(),
+                col_map,
+            });
+        }
+
+        // Resolve macros and normal tables in whitelist
+        let mut resolved_wl = IndexMap::new();
+        for (key, val) in wl {
+            let (name, alias) = if let Some((n, a)) = key.split_once(':') {
+                (n, a)
+            } else {
+                (key.as_str(), key.as_str())
+            };
+            
+            let mut final_mappings = IndexMap::new();
+            if let Some(macro_val) = macros.get(name) {
+                // It's a macro - Collect all exposed fields with their real table:col mapping
+                final_mappings = collect_macro_fields(macro_val, &table_mappings);
+                
+                // If the whitelist specifies additional fields or has a '*' that could override, merge it carefully.
+                // However, if it's a macro, the macro definition itself should generally be the authority.
+                // We'll add whitelist fields ONLY if they are not already mapped.
+                let current_source = macro_val.get("@source").and_then(|v| v.as_str());
+                let base_table_alias = current_source.map(|s| crate::parser::parse_source(s).table_name).unwrap_or_else(|| name.to_string());
+                
+                if let Some(tm) = table_mappings.get(&base_table_alias) {
+                    process_fields(&val, &tm, &mut final_mappings, false); // Don't allow '*' from whitelist to force everything if macro says otherwise
+                } else {
+                    // Failover if for some reason macro base table isn't in whitelist
+                    let tm_dummy = TableMapping { real_name: base_table_alias, col_map: HashMap::new() };
+                    process_fields(&val, &tm_dummy, &mut final_mappings, false);
+                }
+            } else {
+                // Normal table
+                if let Some(tm) = table_mappings.get(alias) {
+                    process_fields(&val, tm, &mut final_mappings, true);
+                } else {
+                     let tm_dummy = TableMapping { real_name: name.to_string(), col_map: HashMap::new() };
+                     process_fields(&val, &tm_dummy, &mut final_mappings, true);
+                }
+            }
+            resolved_wl.insert(alias.to_string(), json!(final_mappings));
+        }
+
+        let wl_final_str = serde_json::to_string(&resolved_wl).unwrap();
+        let wl_escaped = wl_final_str.replace("'", "''");
 
         format!(r#"WITH input_json AS (
     SELECT '{}'::jsonb AS data
 ),
 parsed_tables AS (
     SELECT 
-        split_part(key, ':', 1) AS table_name,
-        COALESCE(NULLIF(split_part(key, ':', 2), ''), split_part(key, ':', 1)) AS table_alias,
+        key AS table_alias,
         value AS col_data
     FROM input_json, jsonb_each(data)
 ),
 parsed_columns AS (
     SELECT 
-        pt.table_name,
         pt.table_alias,
-        obj.value AS real_col,
-        CASE 
-            WHEN obj.key ~ '^[0-9]+$' THEN obj.value
-            ELSE obj.key
-        END AS col_alias
+        split_part(obj.value, ':', 1) AS table_name,
+        substr(obj.value, length(split_part(obj.value, ':', 1)) + 2) AS real_col,
+        obj.key AS col_alias
     FROM parsed_tables pt
-    CROSS JOIN LATERAL jsonb_each_text(
-        CASE WHEN jsonb_typeof(pt.col_data) = 'object' THEN pt.col_data ELSE '{{}}'::jsonb END
-    ) obj
-    
-    UNION ALL
-
-    SELECT 
-        pt.table_name,
-        pt.table_alias,
-        arr.value AS real_col,
-        arr.value AS col_alias
-    FROM parsed_tables pt
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(pt.col_data) = 'array' THEN pt.col_data ELSE '[]'::jsonb END
-    ) arr
+    CROSS JOIN LATERAL jsonb_each_text(pt.col_data) obj
 ),
 joined_schema AS (
     SELECT 
         pc.table_alias,
         CASE 
-            WHEN pc.real_col = '*' THEN COALESCE(c.column_name, 'TABLE_NOT_FOUND') 
+            WHEN pc.real_col = '*' THEN c.column_name 
             ELSE pc.col_alias 
         END AS final_col_alias,
         CASE 
@@ -88,8 +145,8 @@ joined_schema AS (
             WHEN pc.real_col ~* '::(integer|int|bigint|smallint)' THEN 'integer'
             WHEN pc.real_col ~* '::(numeric|decimal|real|double)' THEN 'numeric'
             WHEN pc.real_col ~* '^(COUNT|SUM|AVG|MIN|MAX)\(' THEN 'numeric'
-            WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'text' 
-            ELSE COALESCE(c.data_type, 'COLUMN_NOT_FOUND_IN_DB') 
+            WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'expression' 
+            ELSE COALESCE(c.data_type, 'virtual') 
         END AS data_type
     FROM parsed_columns pc
     LEFT JOIN information_schema.columns c 
@@ -101,7 +158,11 @@ tables_json AS (
     SELECT jsonb_object_agg(table_alias, cols) AS tables_obj
     FROM (
         SELECT table_alias, jsonb_object_agg(final_col_alias, data_type) AS cols
-        FROM joined_schema
+        FROM (
+            SELECT DISTINCT table_alias, final_col_alias, data_type 
+            FROM joined_schema 
+            WHERE final_col_alias IS NOT NULL
+        ) uniq
         GROUP BY table_alias
     ) subquery
 )
@@ -131,4 +192,79 @@ SELECT jsonb_build_object(
     }
     
     result
+}
+
+fn process_fields(val: &Value, tm: &TableMapping, mappings: &mut IndexMap<String, String>, allow_star: bool) {
+    match val {
+        Value::Object(obj) => {
+            for (fk, fv) in obj {
+                if let Some(fv_str) = fv.as_str() {
+                    let real_col = tm.col_map.get(fv_str).map(|s| s.as_str()).unwrap_or(fv_str);
+                    mappings.insert(fk.clone(), format!("{}:{}", tm.real_name, real_col));
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                if let Some(s) = v.as_str() { 
+                    if s == "*" {
+                        if allow_star { mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); }
+                    } else {
+                        let real_col = tm.col_map.get(s).map(|s| s.as_str()).unwrap_or(s);
+                        mappings.insert(s.to_string(), format!("{}:{}", tm.real_name, real_col)); 
+                    }
+                }
+            }
+        }
+        Value::String(s) if s == "*" => {
+            if allow_star { mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); }
+        }
+        _ => {
+            if allow_star && mappings.is_empty() {
+                mappings.insert("*".to_string(), format!("{}:*", tm.real_name));
+            }
+        }
+    }
+}
+
+fn collect_macro_fields(
+    macro_val: &Value, 
+    table_mappings: &HashMap<String, TableMapping>
+) -> IndexMap<String, String> {
+    let mut fields = IndexMap::new();
+    
+    let current_source = macro_val.get("@source").and_then(|v| v.as_str());
+    let current_table_alias = current_source.map(|s| crate::parser::parse_source(s).table_name);
+    
+    if let Some(alias) = &current_table_alias {
+        if let Some(tm) = table_mappings.get(alias) {
+            if let Some(f) = macro_val.get("@fields") {
+                process_fields(f, tm, &mut fields, true);
+            }
+        } else {
+            // Fallback for missing alias in whitelist - shouldn't happen but for safety:
+            if let Some(f) = macro_val.get("@fields") {
+                 let dummy = TableMapping { real_name: alias.clone(), col_map: HashMap::new() };
+                 process_fields(f, &dummy, &mut fields, true);
+            }
+        }
+    }
+
+    if let Some(obj) = macro_val.as_object() {
+        // Children
+        for (k, v) in obj {
+            if !k.starts_with('@') {
+                if let Some(child_obj) = v.as_object() {
+                    let is_flatten = child_obj.get("@flatten").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if is_flatten {
+                        let child_fields = collect_macro_fields(v, table_mappings);
+                        for (fk, fv) in child_fields {
+                            fields.insert(fk, fv);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fields
 }

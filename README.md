@@ -22,7 +22,7 @@ Kutubxona barcha mashhur tillar (Java (JNA), PHP (FFI), Node.js, Python, Go, C#)
 ```c
 char* uaq_parse(
     const char* json_input,     // Frontend so'rovi
-    const char* whitelist_json, // Ruxsat etilgan maydonlar va Aliaslar
+    const char* whitelist_json, // Ruxsat etilgan maydonlar: db table va ustunlar
     const char* relations_json, // Baza bo'yicha foreign key bog'lamalari
     const char* macros_json     // Ixtiyoriy: Macro-shablonlar
 );
@@ -83,7 +83,7 @@ Murakkab ierarxiyani yagona jadval sifatida e'lon qilish:
   }
 }
 ```
-*Izoh:* `@flatten: true` - farzand jadvaldan keladigan ma'lumotlarni alohida obyekt qilib emas, ota jadvalning (employee_info) o'ziga qo'shib yuboradi.
+*Izoh:* Agar bola node ga `"@flatten": true` berilsa, uning `@fields` lari ota node ning ob'ektiga birlashib (merge) ketadi. Natijada alohida ichki ob'ekt yaratilmaydi:
 
 ---
 
@@ -92,12 +92,16 @@ Murakkab ierarxiyani yagona jadval sifatida e'lon qilish:
 Frontend SQL yoki backenddagi murakkab relatsiyalarni bilmagan holatda so'rovlarni avtomatik qura oladi.
 
 ### Asosiy Parametrlar va Diktatorlar
-- `@data` - Bitta ma'lumot obyektini tortib olish.
-- `@data[]` - Ma'lumotlarni massiv (ro'yxat) qilib olish.
-- `@source` - Jadval nomi (yoki Macro nomi) va unga tegishli Filtering/Sorting shartlari.
-- `@fields` - Aynan qaysi ustunlar qaytishi kerakligi (Turi: Array yoki Object).
-- `$limit`, `$offset`, `$order` - Paginate va saralash uchun maxsus keywordlar.
-- `$join` - Ulash turini (Masalan: `LEFT`) o'zgartirish.
+
+| Direktiva  | Vazifasi                                                          | Shart |
+|------------|-------------------------------------------------------------------|-------|
+| `@data`    | Bitta ma'lumot obyektini tortib olish.                            | Ha    |
+| `@data[]`  | Ma'lumotlarni massiv (ro'yxat) qilib olish.                       | Ha    |
+| `@source`  | Manba jadval, filtrlar, va konfiguratsiya                         | Ha    |
+| `@fields`  | Aynan qaysi ustunlar qaytishi kerakligi (Turi: Array yoki Object) | Ha    |
+| `@flatten` | Bola node maydonlarini ota node ga birlashtirib (merge) yuborish  | Yo'q  |
+| `[]`       | Kalit nomi oxirida — natija Array (ro'yxat) bo'lib qaytadi        | Yo'q  |
+
 
 ### So'rov namunalari
 
@@ -114,15 +118,29 @@ Jadvaldagi istalgan xavfsiz ruxsat etilgan maydonlarni massiv formatida so'rash:
 
 **2. Asosiy Filtrlar (Where Clauses)**
 `@source` ichida massiv shaklida filtrlar argument qilib olinishi mumkin:
-- `=`: `status: 1`
-- `!=`: `type: !:0`
-- `>`, `<`: `age: >18`, `price: <500`
-- `LIKE`: `name: ~John`
-- `IN`: `category: in (1, 2, 3)`
-- `BETWEEN`: `id: 10..50`
+
+| Operator | Ma'nosi          | Misol                   |
+|----------|------------------|-------------------------|
+| `:`      | Teng (=)         | `status: 1`             |
+| `!:`     | Teng emas (!=)   | `status: !: 0`          |
+| `>`      | Katta (>)        | `age: > 18`             |
+| `<`      | Kichik (<)       | `age: < 65`             |
+| `..`     | Oraliq (between) | `id: 1..45`             |
+| `~`      | O'xshash (like)  | `name: ~ Ali%`          |
+| `in`     | Ro'yxatda (in)   | `rank_id: in (1, 2, 3)` |
+
+
+**Paginate va saralash uchun maxsus konfiguratsiya parametrlari (`$` bilan boshlanadi):**
+
+| Parametr  | Vazifasi                       | Misol             |
+|-----------|--------------------------------|-------------------|
+| `$limit`  | Qaytariladigan qatorlar soni   | `$limit: 50`      |
+| `$offset` | Boshlang'ich o'tkazib yuborish | `$offset: 100`    |
+| `$order`  | Tartiblash                     | `$order: id DESC` |
+| `$join`   | Ulash turini o'zgartirish.     | `$left: LEFT`     |
 
 ```json
-"@source": "emp[status: 1, age: >25, type: in (1, 2), id: 1..100]"
+"@source": "emp[status: 1, age: >25, type: in (1, 2), id: 1..100, $join: RIGHT]"
 ```
 
 **3. Nested Fetching (Bog'langan Jadvallarni olish)**

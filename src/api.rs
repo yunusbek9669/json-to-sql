@@ -55,7 +55,7 @@ pub extern "C" fn uaq_parse(
 
     // Check for @info request
     if let Some(info_arr) = parsed_json.get("@info").and_then(|v| v.as_array()) {
-        let result = info::process_info_request(info_arr, whitelist_str, relations_str);
+        let result = info::process_info_request(info_arr, whitelist_str, relations_str, macros_str);
         return encode_result(result);
     }
 
