@@ -5,6 +5,7 @@ use std::collections::HashMap;
 struct TableMapping {
     real_name: String,
     col_map: HashMap<String, String>,
+    unrestricted_star: bool,
 }
 
 pub fn process_info_request(
@@ -58,54 +59,72 @@ pub fn process_info_request(
             };
             
             let mut col_map = HashMap::new();
-            if let Value::Object(obj) = val {
-                for (k, v) in obj {
-                    if let Some(v_str) = v.as_str() {
-                        col_map.insert(k.clone(), v_str.to_string());
+            let mut unrestricted_star = false;
+            
+            match val {
+                Value::Object(obj) => {
+                    for (k, v) in obj {
+                        if let Some(v_str) = v.as_str() {
+                            col_map.insert(k.clone(), v_str.to_string());
+                        }
                     }
+                }
+                Value::Array(arr) => {
+                    for v in arr {
+                        if v.as_str() == Some("*") { unrestricted_star = true; break; }
+                        if let Some(s) = v.as_str() { col_map.insert(s.to_string(), s.to_string()); }
+                    }
+                }
+                Value::String(s) if s == "*" => {
+                    unrestricted_star = true;
+                }
+                _ => {
+                    unrestricted_star = true; // Fallback for complex structures or empty
                 }
             }
             
             table_mappings.insert(alias.to_string(), TableMapping {
                 real_name: real.to_string(),
                 col_map,
+                unrestricted_star,
             });
         }
 
         // Resolve macros and normal tables in whitelist
         let mut resolved_wl = IndexMap::new();
         for (key, val) in wl {
-            let (name, alias) = if let Some((n, a)) = key.split_once(':') {
+            let (_, alias) = if let Some((n, a)) = key.split_once(':') {
                 (n, a)
             } else {
                 (key.as_str(), key.as_str())
             };
             
             let mut final_mappings = IndexMap::new();
-            if let Some(macro_val) = macros.get(name) {
+            if let Some(macro_val) = macros.get(alias).or_else(|| {
+                // Also check by the "name" part (before :)
+                if let Some((n, _)) = key.split_once(':') {
+                    macros.get(n)
+                } else {
+                    None
+                }
+            }) {
                 // It's a macro - Collect all exposed fields with their real table:col mapping
                 final_mappings = collect_macro_fields(macro_val, &table_mappings);
                 
-                // If the whitelist specifies additional fields or has a '*' that could override, merge it carefully.
-                // However, if it's a macro, the macro definition itself should generally be the authority.
-                // We'll add whitelist fields ONLY if they are not already mapped.
+                // Merge with whitelist's own fields for this macro alias
                 let current_source = macro_val.get("@source").and_then(|v| v.as_str());
-                let base_table_alias = current_source.map(|s| crate::parser::parse_source(s).table_name).unwrap_or_else(|| name.to_string());
+                let base_table_alias = current_source.map(|s| crate::parser::parse_source(s).table_name).unwrap_or_else(|| alias.to_string());
                 
                 if let Some(tm) = table_mappings.get(&base_table_alias) {
                     process_fields(&val, &tm, &mut final_mappings, false); // Don't allow '*' from whitelist to force everything if macro says otherwise
                 } else {
-                    // Failover if for some reason macro base table isn't in whitelist
-                    let tm_dummy = TableMapping { real_name: base_table_alias, col_map: HashMap::new() };
+                    let tm_dummy = TableMapping { real_name: base_table_alias, col_map: HashMap::new(), unrestricted_star: true };
                     process_fields(&val, &tm_dummy, &mut final_mappings, false);
                 }
             } else {
                 // Normal table
                 if let Some(tm) = table_mappings.get(alias) {
                     process_fields(&val, tm, &mut final_mappings, true);
-                } else {
-                     let tm_dummy = TableMapping { real_name: name.to_string(), col_map: HashMap::new() };
-                     process_fields(&val, &tm_dummy, &mut final_mappings, true);
                 }
             }
             resolved_wl.insert(alias.to_string(), json!(final_mappings));
@@ -208,7 +227,16 @@ fn process_fields(val: &Value, tm: &TableMapping, mappings: &mut IndexMap<String
             for v in arr {
                 if let Some(s) = v.as_str() { 
                     if s == "*" {
-                        if allow_star { mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); }
+                        if allow_star { 
+                            if tm.unrestricted_star {
+                                mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); 
+                            } else {
+                                // Expand * using the col_map from whitelist
+                                for (fk, fv) in &tm.col_map {
+                                    mappings.insert(fk.clone(), format!("{}:{}", tm.real_name, fv));
+                                }
+                            }
+                        }
                     } else {
                         let real_col = tm.col_map.get(s).map(|s| s.as_str()).unwrap_or(s);
                         mappings.insert(s.to_string(), format!("{}:{}", tm.real_name, real_col)); 
@@ -217,11 +245,25 @@ fn process_fields(val: &Value, tm: &TableMapping, mappings: &mut IndexMap<String
             }
         }
         Value::String(s) if s == "*" => {
-            if allow_star { mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); }
+            if allow_star { 
+                if tm.unrestricted_star {
+                    mappings.insert("*".to_string(), format!("{}:*", tm.real_name)); 
+                } else {
+                    for (fk, fv) in &tm.col_map {
+                        mappings.insert(fk.clone(), format!("{}:{}", tm.real_name, fv));
+                    }
+                }
+            }
         }
         _ => {
             if allow_star && mappings.is_empty() {
-                mappings.insert("*".to_string(), format!("{}:*", tm.real_name));
+                if tm.unrestricted_star {
+                    mappings.insert("*".to_string(), format!("{}:*", tm.real_name));
+                } else {
+                    for (fk, fv) in &tm.col_map {
+                        mappings.insert(fk.clone(), format!("{}:{}", tm.real_name, fv));
+                    }
+                }
             }
         }
     }
@@ -242,9 +284,8 @@ fn collect_macro_fields(
                 process_fields(f, tm, &mut fields, true);
             }
         } else {
-            // Fallback for missing alias in whitelist - shouldn't happen but for safety:
             if let Some(f) = macro_val.get("@fields") {
-                 let dummy = TableMapping { real_name: alias.clone(), col_map: HashMap::new() };
+                 let dummy = TableMapping { real_name: alias.clone(), col_map: HashMap::new(), unrestricted_star: true };
                  process_fields(f, &dummy, &mut fields, true);
             }
         }
