@@ -164,6 +164,7 @@ joined_schema AS (
             WHEN pc.real_col ~* '::(integer|int|bigint|smallint)' THEN 'integer'
             WHEN pc.real_col ~* '::(numeric|decimal|real|double)' THEN 'numeric'
             WHEN pc.real_col ~* '^(COUNT|SUM|AVG|MIN|MAX)\(' THEN 'numeric'
+            WHEN pc.real_col = '____JSON____' THEN 'json'
             WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'expression' 
             ELSE COALESCE(c.data_type, 'virtual') 
         END AS data_type
@@ -302,6 +303,9 @@ fn collect_macro_fields(
                         for (fk, fv) in child_fields {
                             fields.insert(fk, fv);
                         }
+                    } else {
+                        // Non-flattened child should be identified as json
+                        fields.insert(k.clone(), "VIRTUAL:____JSON____".to_string());
                     }
                 }
             }
