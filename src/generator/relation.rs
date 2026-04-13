@@ -13,47 +13,72 @@ impl SqlGenerator {
         _parent_real: &str, child_real: &str,
         node_name: &str,
     ) -> Result<Option<String>, String> {
-        // Specific keys (with :node_name suffix)
-        let spec_dir = format!("{}->{}:{}", parent_alias, child_alias, node_name);
-        let spec_bi1 = format!("{}<->{}:{}", parent_alias, child_alias, node_name);
-        let spec_bi2 = format!("{}<->{}:{}", child_alias, parent_alias, node_name);
-        // Generic keys
-        let key_dir = format!("{}->{}", parent_alias, child_alias);
-        let key_bi1 = format!("{}<->{}", parent_alias, child_alias);
-        let key_bi2 = format!("{}<->{}", child_alias, parent_alias);
+        let symbols = vec!["-><-", "<->", "->", "<-"];
+        
+        for sym in &symbols {
+            let spec = format!("{1}{0}{2}:{3}", sym, parent_alias, child_alias, node_name);
+            let key = format!("{1}{0}{2}", sym, parent_alias, child_alias);
+            
+            // Check specific first, then generic
+            for lookup in &[&spec, &key] {
+                if let Some(r) = self.relations.get(*lookup) {
+                    Self::validate_relation_template(r, parent_alias, child_alias, lookup)?;
+                    
+                    let table_expr = if child_real == child_alias {
+                        child_real.to_string()
+                    } else {
+                        format!("{} AS {}", child_real, child_alias)
+                    };
 
-        let candidates: Vec<(&str, bool)> = vec![
-            (&spec_dir, false),
-            (&spec_bi1, false),
-            (&spec_bi2, true),
-            (&key_dir, false),
-            (&key_bi1, false),
-            (&key_bi2, true),
-        ];
+                    let default_join = match *sym {
+                        "-><-" => "INNER JOIN",
+                        "<->" => "FULL JOIN",
+                        "->" => "LEFT JOIN",
+                        "<-" => "RIGHT JOIN",
+                        _ => "LEFT JOIN",
+                    };
 
-        for (key, reversed) in candidates {
-            if let Some(r) = self.relations.get(key) {
-                // Validate: template must use @1, @2, @table — not raw alias names
-                let (t1, t2) = if reversed { (child_alias, parent_alias) } else { (parent_alias, child_alias) };
-                Self::validate_relation_template(r, t1, t2, key)?;
-                // Replace: @table → "real AS alias", @1/@2 → alias (SQL alias)
-                let (a1, a2) = if reversed {
-                    (child_alias, parent_alias)
-                } else {
-                    (parent_alias, child_alias)
-                };
-                let child_a = if reversed { child_alias } else { child_alias };
-                let child_r = if reversed { child_real } else { child_real };
-                let table_expr = if child_r == child_a {
-                    child_r.to_string() // No alias needed (no whitelist alias)
-                } else {
-                    format!("{} AS {}", child_r, child_a)
-                };
-                let resolved = r
-                    .replace("@table", &table_expr)
-                    .replace("@1", a1)
-                    .replace("@2", a2);
-                return Ok(Some(resolved));
+                    let resolved = r
+                        .replace("@join", default_join)
+                        .replace("@table", &table_expr)
+                        .replace("@1", parent_alias)
+                        .replace("@2", child_alias);
+                    
+                    return Ok(Some(resolved));
+                }
+            }
+
+            // Check reversed for bi-directional symbols
+            if *sym == "<->" || *sym == "-><-" {
+                let spec_rev = format!("{1}{0}{2}:{3}", sym, child_alias, parent_alias, node_name);
+                let key_rev = format!("{1}{0}{2}", sym, child_alias, parent_alias);
+
+                for lookup in &[&spec_rev, &key_rev] {
+                    if let Some(r) = self.relations.get(*lookup) {
+                        Self::validate_relation_template(r, child_alias, parent_alias, lookup)?;
+
+                        let table_expr = if child_real == child_alias {
+                            child_real.to_string()
+                        } else {
+                            format!("{} AS {}", child_real, child_alias)
+                        };
+
+                        let default_join = match *sym {
+                            "-><-" => "INNER JOIN",
+                            "<->" => "FULL JOIN",
+                            _ => "LEFT JOIN",
+                        };
+
+                        // a1 is child, a2 is parent because template is reversed
+                        let resolved = r
+                            .replace("@join", default_join)
+                            .replace("@table", &table_expr)
+                            .replace("@1", child_alias)
+                            .replace("@2", parent_alias);
+                        
+                        return Ok(Some(resolved));
+                    }
+                }
             }
         }
 
@@ -61,32 +86,29 @@ impl SqlGenerator {
     }
 
     /// Builds an adjacency graph from relation keys for path discovery.
-    /// Parses keys like "a->b", "a<->b", "a->b:name" into edges.
     pub(crate) fn build_relation_graph(relations: &HashMap<String, String>) -> HashMap<String, Vec<String>> {
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+        let symbols = vec!["-><-", "<->", "->", "<-"];
 
         for key in relations.keys() {
-            let is_bidi = key.contains("<->");
-            let parts: Vec<&str> = if is_bidi {
-                key.splitn(2, "<->").collect()
-            } else {
-                key.splitn(2, "->").collect()
-            };
+            for sym in &symbols {
+                if let Some(pos) = key.find(sym) {
+                    let left = key[..pos].trim();
+                    let right_raw = key[pos + sym.len()..].trim();
+                    let right = right_raw.split(':').next().unwrap_or(right_raw);
 
-            if parts.len() != 2 { continue; }
-
-            let left = parts[0].trim();
-            // Strip :node_name suffix from right side
-            let right_raw = parts[1].trim();
-            let right = right_raw.split(':').next().unwrap_or(right_raw);
-
-            graph.entry(left.to_string()).or_default().push(right.to_string());
-            if is_bidi {
-                graph.entry(right.to_string()).or_default().push(left.to_string());
+                    if !left.is_empty() && !right.is_empty() {
+                        graph.entry(left.to_string()).or_default().push(right.to_string());
+                        // Bi-directional symbols
+                        if *sym == "<->" || *sym == "-><-" {
+                            graph.entry(right.to_string()).or_default().push(left.to_string());
+                        }
+                        break; // Found the primary symbol
+                    }
+                }
             }
         }
 
-        // Deduplicate neighbors
         for neighbors in graph.values_mut() {
             neighbors.sort();
             neighbors.dedup();
@@ -125,109 +147,75 @@ impl SqlGenerator {
     }
 
     /// Auto-join all intermediate tables along a discovered path.
-    /// Returns the JOINs for all steps from path[0] to path[last].
-    pub(crate) fn auto_join_path(&mut self, path: &[String]) -> Result<(), String> {
+    pub(crate) fn auto_join_path(&mut self, path: &[String], override_jt: Option<&str>) -> Result<(), String> {
         for i in 0..path.len() - 1 {
             let step_from = &path[i];
             let step_to = &path[i + 1];
 
-            // Skip if this intermediate table is already joined
-            if i > 0 && self.joined_aliases.contains(step_from) {
-                // Already joined, check next step
-            }
             if self.joined_aliases.contains(step_to) {
-                continue; // Target already joined
+                continue;
             }
 
             let from_real = self.guard.resolve_alias(step_from)?;
             let to_real = self.guard.resolve_alias(step_to)?;
             self.guard.validate_table(step_to)?;
 
-            let join = self.resolve_relation(step_from, step_to, &from_real, &to_real, step_to)?;
+            let mut join = self.resolve_relation(step_from, step_to, &from_real, &to_real, step_to)?
+                .ok_or_else(|| format!("No relation template for path step {}->{}", step_from, step_to))?;
 
-            if let Some(j) = join {
-                if !j.to_uppercase().contains("JOIN") {
-                    return Err(format!("Invalid JOIN syntax in path {}->{}", step_from, step_to));
-                }
-                self.joins.push(j);
-                self.joined_aliases.insert(step_to.clone());
-            } else {
-                return Err(format!("No relation template for path step {}->{}", step_from, step_to));
+            if let Some(jt) = override_jt {
+                join = Self::override_join_type(&join, jt);
             }
+
+            self.joins.push(join);
+            self.joined_aliases.insert(step_to.clone());
         }
 
         Ok(())
     }
 
     /// Overrides the JOIN type keyword in a generated JOIN string.
-    /// e.g., "INNER JOIN table ON ..." → "LEFT JOIN table ON ..."
     pub(crate) fn override_join_type(join_str: &str, join_type: &str) -> String {
-        let upper = join_str.to_uppercase();
-        let replacement = match join_type.as_ref() {
-            "left" => "LEFT JOIN",
-            "right" => "RIGHT JOIN",
-            "inner" => "INNER JOIN",
+        let replacement = match join_type.to_lowercase().as_str() {
+            "left" | "->" => "LEFT JOIN",
+            "right" | "<-" => "RIGHT JOIN",
+            "inner" | "-><-" => "INNER JOIN",
+            "full" | "<->" => "FULL JOIN",
             "cross" => "CROSS JOIN",
-            _ => return join_str.to_string(), // unknown → no change
+            _ => return join_str.to_string(),
         };
-        // Replace any existing JOIN type prefix
-        if upper.starts_with("INNER JOIN") {
-            format!("{}{}", replacement, &join_str[10..])
-        } else if upper.starts_with("LEFT JOIN") {
-            format!("{}{}", replacement, &join_str[9..])
-        } else if upper.starts_with("RIGHT JOIN") {
-            format!("{}{}", replacement, &join_str[10..])
-        } else if upper.starts_with("CROSS JOIN") {
-            format!("{}{}", replacement, &join_str[10..])
-        } else if upper.starts_with("JOIN") {
-            format!("{}{}", replacement, &join_str[4..])
-        } else {
-            join_str.to_string()
+
+        let upper = join_str.to_uppercase();
+        let keywords = vec!["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "JOIN"];
+        
+        for kw in keywords {
+            if upper.starts_with(kw) {
+                return format!("{}{}", replacement, &join_str[kw.len()..]);
+            }
         }
+        
+        join_str.to_string()
     }
 
     /// Only @1, @2, @table placeholders are allowed.
     pub(crate) fn validate_relation_template(template: &str, table1: &str, table2: &str, key: &str) -> Result<(), String> {
-        // Remove all valid placeholders first, then check for raw names
         let cleaned = template
+            .replace("@join", "")
             .replace("@table", "")
             .replace("@1", "")
             .replace("@2", "");
         
-        // Check if any raw table name still appears (with dot after it = column reference)
-        if cleaned.contains(&format!("{}.", table1)) {
+        if cleaned.contains(&format!("{}.", table1)) || cleaned.contains(&format!("{}.", table2)) {
             return Err(format!(
-                "Relations Error [{}]: Raw table name '{}.' used directly. Use @1, @2, or @table placeholders instead.",
-                key, table1
+                "Relations Error [{}]: Raw table names used directly. Use @1, @2, or @table placeholders.",
+                key
             ));
-        }
-        if cleaned.contains(&format!("{}.", table2)) {
-            return Err(format!(
-                "Relations Error [{}]: Raw table name '{}.' used directly. Use @1, @2, or @table placeholders instead.",
-                key, table2
-            ));
-        }
-        
-        // Also check JOIN target (after JOIN keyword, before ON)
-        let upper = template.to_uppercase();
-        if let Some(join_pos) = upper.find("JOIN ") {
-            let after_join = &template[join_pos + 5..];
-            let target = after_join.split_whitespace().next().unwrap_or("");
-            if target != "@table" && target != "@1" && target != "@2" {
-                return Err(format!(
-                    "Relations Error [{}]: Raw table name '{}' used after JOIN. Use @table, @1, or @2 placeholder instead.",
-                    key, target
-                ));
-            }
         }
         
         Ok(())
     }
 }
 
-/// Extracts the ON condition from a JOIN string.
-/// E.g. "INNER JOIN foo ON bar.id = foo.bar_id AND foo.status = 1"
-/// => "bar.id = foo.bar_id AND foo.status = 1"
 pub(crate) fn extract_on_condition(join_str: &str) -> Result<String, String> {
     let upper = join_str.to_uppercase();
     if let Some(pos) = upper.find(" ON ") {

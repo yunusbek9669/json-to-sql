@@ -9,6 +9,7 @@ pub struct FilterRule {
     pub value: String,    // Stored as string to be parsed or inserted directly as bound param
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceDef {
     pub table_name: String,
     pub filters: Vec<FilterRule>,
@@ -19,8 +20,11 @@ pub struct SourceDef {
     pub join_type: Option<String>,
     /// Explicit relation name (from $rel modifier, maps to :node_name suffix)
     pub rel: Option<String>,
+    /// Whether this source definition was expanded from a Macro/VirtualTable
+    pub from_macro: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryNode {
     pub name: String,
     pub is_list: bool,
@@ -32,8 +36,6 @@ pub struct QueryNode {
     /// Query mode: "list" (default), "count", "first"
     pub mode: Option<String>,
 }
-
-
 
 #[derive(Debug, Serialize)]
 pub struct ParseResult {
