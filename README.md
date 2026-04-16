@@ -1,200 +1,155 @@
 # Universal Adaptive Query (UAQ) Engine
 
-UAQ (Universal Adaptive Query) — bu tizim qismlari oralig'idagi ma'lumotlar ma'muriyatini osonlashtirish uchun yozilgan, yuqori tezlikka ega JSON-to-SQL kompilyatori.
-Kutubxona xavfsiz C-FFI (Rust) ustiga qurilgan bo'lib, kiruvchi JSON formatidagi dinamik so'rovlarni xavfsizlik (Whitelist) qoidalariga asosan tekshiradi va PostgreSQL uchun optimizatsiya qilingan (LATERAL JOIN) SQL so'rovlariga aylantiradi.
+UAQ (Universal Adaptive Query) — bu Tizimning turli xil komponentlari hamda backend-frontend o'rtasidagi ma'lumot almashinuvini inqilobiy darajada osonlashtirish uchun yaratilgan dinamik JSON-to-SQL kompilyatori. Rust tilida yozilganligi tufayli eng yuqori darajadagi tezlikda (Native) ishlaydi va har qanday til (PHP, Java, Node.js, Python, va hk) bilan xavfsiz (FFI texnologiyasi asosida) integratsiya qilinadi.
+
+Ushbu qollanma UAQ dvigateli haqida to‘liq tasavvurga ega bo'lish, hamda **Backend** va **Frontend** dasturchilari o'rtasidagi kelishuvni mukammal qilish uchun qo'llanma hisoblanadi. 
 
 ---
 
-## 1. Tizim Arxitekturasi
+## 🛠 Backend Dasturchilar Uchun Qo'llanma
 
-UAQ ishlashi uchun 4 ta asosiy qatlam mavjud:
-1. **JSON Input**: Frontend yuboradigan daraxt (tree) ko'rinishidagi ma'lumot qidiruv shakli.
-2. **Whitelist**: Qaysi jadval va ustunlarga ruxsat borligini nazorat qiluvchi Security qatlami.
-3. **Relations**: Jadvallararo avtomatik ulash (Join) mexanizmini belgilab beruvchi Graph qatlami.
-4. **Macros**: (Ixtiyoriy) Oldindan yaratilgan abstrakt shablonlar / Virtual jadvallar to'plami.
+Backend dasturchining asosiy vazifasi — qat'iy Xavfsizlik (Whitelist) qoidalarini belgilash hamda bazadagi jadvallar o'zaro qanday aloqada ekanligini bildirishdan iborat. Shundan so'ng qolgan barcha og'ir yukni (SQL kod yozish va ma'lumotni tuzish ishlari) UAQ Engine to'la o'z zimmasiga oladi.
 
----
-
-## 2. Backend Integratsiyasi
-
-### C-FFI API
-Kutubxona barcha mashhur tillar (Java (JNA), PHP (FFI), Node.js, Python, Go, C#) bilan quyidagi funksiya va xotirani tozalash API'si orqali ishlaydi:
+### 1. Tizim Integratsiyasi (C-FFI)
+Kutubxona C tili arxitekturasi yordamida barcha platformalar bilan ulanadi. C-Header tarifi:
 ```c
 char* uaq_parse(
-    const char* json_input,     // Frontend so'rovi
-    const char* whitelist_json, // Ruxsat etilgan maydonlar: db table va ustunlar
-    const char* relations_json, // Baza bo'yicha foreign key bog'lamalari
-    const char* macros_json     // Ixtiyoriy: Macro-shablonlar
+    const char* json_input,     // Frontenddan kelgan JSON so'rov
+    const char* whitelist_json, // Backendda yozilgan Whitelist (Xavfsizlik)
+    const char* relations_json, // Jadvallar aloqalari (Foreign keys)
+    const char* macros_json     // Ixtiyoriy: Oldindan yozilgan murakkab makroslar
 );
 
-void uaq_free_string(char* s);  // Xotirada qolib ketmasligi uchun tozalash
+void uaq_free_string(char* s);  // Xotirani tozalash uchun
 ```
+> *Backend shunchaki Middleware sifatidadigini xizmat qiladi: frontend so'rovini kutubxonaga beradi, qaytgan SQL natini xavfsiz ishlatib (`:p1`, `:p2` kabi parametrlar bilan limitlagan holda) ma'lumotlarni chiqarib beradi.*
 
-### Whitelist Konfiguratsiyasi (Security & Mapping)
-Format: `"database_table_name:frontend_table_name"`
-Massiv `["*"]` berilsa so'zingsiz barcha ustunlarga ruxsat etiladi, Obyekt berilsa faqatgina xaritaga olingan ko'rsatkichlarga ruxsat beriladi va `CONCAT` kabi SQL agregatlar ruxsatdan o'tadi.
+### 2. Whitelist: Xavfsizlik Qatlami
+Bunda frontend bazadagi qaysi jadvalni qanday taxallus (alias) ostida ko'rishi va qaysi ustunlarga kira olishi belgilab qo'yiladi.
+
+Format: `"haqiqiy_jadval : taxallus_nomi"`
+
+*   **Ruxsat berish (Massiv):** `["*"]` yozilsa, barcha ustunlarga ochiq ruxsat etiladi (avtomat tekshiriladi).
+*   **Virtual yoki Obfuskatsiya Qilingan Ustunlar (Obyekt):** Obyekt ko'rinishida kalit uzatish imkonini beradi. Shunda frontend faqat qat'iy cheklangan virtual-qiymatlarga etib boradi.
 ```json
 {
-  "user_profile:profiles": ["*"],
+  "user_profile:profile": ["*"],
   "employee:emp": {
     "id": "id",
-    "full_name": "CONCAT(last_name, ' ', first_name)",
-    "status": "status"
-  },
-  "organization:org": [
-    "id",
-    "name",
-    "status"
-  ],
-  "department:dep": [
-    "id",
-    "name",
-    "status"
-  ],
-  "staff_position:position": ["*"]
-}
-```
-
-### Relations Konfiguratsiyasi (Joins)
-Jadvallarni bir-biriga tushuntirish uchun xaritalash:
-```json
-{
-  "emp->profiles": "emp.profile_id = profiles.id AND profiles.is_active = 1"
-}
-```
-
-### Macros Konfiguratsiyasi (Virtual Tables)
-Murakkab ierarxiyani yagona jadval sifatida e'lon qilish:
-```json
-{
-  "virtualPosition": {
-    "@source": "position[is_active: true]",
-    "@fields": ["*"],
-    "info": {
-      "@source": "org[status: 1]",
-      "@flatten": true,
-      "@fields": { "organization_name": "name" },
-      "department": {
-        "@source": "dep[status: 1]",
-        "@flatten": true,
-        "@fields": { "department_name": "name" }
-      }
-    }
+    "full_name": "CONCAT(last_name, ' ', first_name)" // Frontend faqat full_name ko'ra oladi
   }
 }
 ```
-*Izoh:* Agar bola node ga `"@flatten": true` berilsa, uning `@fields` lari ota node ning ob'ektiga birlashib (merge) ketadi. Natijada alohida ichki ob'ekt yaratilmaydi:
+
+### 3. Relations: Jadvallarni Bog'lash (Auto-Join)
+Backend faqatgina ikki jadvallar o'rtasidagi yo'nalishni bir marta konfiguratsiyaga kiritib qo'yadi. UAQ graf orqali eng murakkab bo'lgan yo'llarni ham (BFS yordamida) o'zi topib avtomatlashtirilgan JOIN larni qura oladi. Shuningdek JOIN turiga qattiq bog'lanib qolmaslik uchun qoida `LEFT JOIN` deb emas, `@join` shaklida yozilishi maqsadga muvofiq:
+```json
+{
+  "emp->profile": "@join @table ON @1.id = @2.user_id AND @2.status = 1"
+}
+```
+*   **Standart JOIN turlari o'qilishi:** Kod kalitdagi belgiga asoslanib asosiy ulanish qanday ekanini anglaydi: 
+    *   `->` = `LEFT JOIN`
+    *   `<-` = `RIGHT JOIN`
+    *   `-><-` = `INNER JOIN`
+    *   `<->` = `FULL JOIN`
+Biroq bu ko'rinish faqatgina *standart* holat hisoblanadi. Agar frontend dasturchi boshqacha ulanishga ehtiyoj sezsa, bu qarorni bemalol o'z qo'liga ola biladi (pastdagi `$join` bo'limiga qarang)!
+
 
 ---
 
-## 3. Frontend Imkoniyatlari (JSON Query)
+## 💻 Frontend Dasturchilar Uchun Qo'llanma
 
-Frontend SQL yoki backenddagi murakkab relatsiyalarni bilmagan holatda so'rovlarni avtomatik qura oladi.
+Odatda har bir yangi filtr yoki qoshimcha bog'langan jadval uchun backendda alohida API (Endpoint) yozilishi kerak bo'ladi. Ushbu tizimning eng asosiy taklifi esa: **Yagona Endpoint** tushunchasidir!
+Endi har safar yangi ehtiyoj tug'ilganda backend dasturchilarni bezovta qilmaysiz. Yagona API orqali, qanday murakkab ierarxiya (Daraxt/Piramida) shaklida o'zingizga ma'lumot kerak bo'lsa, xuddi shu strukturani tushuntiruvchi shunchaki bitta JSON yuborasiz (Graph kabi)! 
 
-### Asosiy Parametrlar va Diktatorlar
+Tizim PostgreSQL ning eng ilg'or funksiyalari (LATERAL, JSON_BUILD_OBJECT, va JSON_AGG) orqali barcha chigal munosabatlarni qisqa vaqt ichida tayyor javob ko'rinishida beradi. 
 
-| Direktiva  | Vazifasi                                                          | Shart |
-|------------|-------------------------------------------------------------------|-------|
-| `@data`    | Bitta ma'lumot obyektini tortib olish.                            | Ha    |
-| `@data[]`  | Ma'lumotlarni massiv (ro'yxat) qilib olish.                       | Ha    |
-| `@source`  | Manba jadval, filtrlar, va konfiguratsiya                         | Ha    |
-| `@fields`  | Aynan qaysi ustunlar qaytishi kerakligi (Turi: Array yoki Object) | Ha    |
-| `@flatten` | Bola node maydonlarini ota node ga birlashtirib (merge) yuborish  | Yo'q  |
-| `[]`       | Kalit nomi oxirida — natija Array (ro'yxat) bo'lib qaytadi        | Yo'q  |
+### 1. Asosiy Kalit So'zlar (Direktivalar)
 
+| Direktiva  | Vazifasi                                                                   | Majburiy |
+|------------|----------------------------------------------------------------------------|----------|
+| `@data`    | Yagona obyekt bazadan olish uchun (Root node sifatida qat'iy).             | Ha       |
+| `@data[]`  | Ma'lumotlarni massiv (ro'yxat qilib `[{}, {}]`) olish uchun.               | Ha       |
+| `@source`  | Manba aliasi (Backenddagi whitelist ruxsati asosida) va filtrlar.          | Ha       |
+| `@fields`  | Natijada sizga aniq qaysi maydon kalitlari qaytib kelishi zarurligi.       | Yo'q     |
+| `@flatten` | Joriy tugun ichkisini bitta ustki (`ota`) qavatga yoyib (merge) yuborish.  | Yo'q     |
+| `[]`       | İstagan rolingiz (tugun nomi) oxiriga ulasangiz, ichki ARRAY olib kelasiz. | Yo'q     |
 
-### So'rov namunalari
+### 2. Soddadan Murakkabga So'rov Yozish
 
-**1. Oddiy Ma'lumot (Array Fields)**
-Jadvaldagi istalgan xavfsiz ruxsat etilgan maydonlarni massiv formatida so'rash:
+**Birinchi Qadam: Oddiy Ro'yxat o'qish (Paginatsiya bilan)**  
+Eng sodda holatda jadval ma'lumlarini tartib bilan, 10 tagacha cheklov bilan olaylik.
+
 ```json
 {
   "@data[]": {
-    "@source": "emp",
-    "@fields": ["id", "status"]
+    "@source": "emp[status: 1, age: >25, $limit: 10, $order: id DESC]",
+    "@fields": ["id", "full_name"]
   }
 }
 ```
+*Iltimos diqqat qiling:* Filtrlar (`:`, `!:`, `>`, `<`, `..`, `~`, `in`) to'g'ridan-to'g'ri `@source` da konfiguratsiya qilinadi. Cheklovlar (`$limit`, `$offset`, `$order`) sharti qo'llaniladi.
 
-**2. Asosiy Filtrlar (Where Clauses)**
-`@source` ichida massiv shaklida filtrlar argument qilib olinishi mumkin:
+**Jadvalararo JOIN turini dinamik o'zgartirish (`$join`)**  
+Frontend endi ma'lum bir jadval ro'yxatini ichidan ulanishni qo'lda boshqarish imkoniyatiga ega. Qoida tariqasida kelayotgan o'zgarishlar (INNER yoki LEFT bo'lishi backendda belgilanadi), biroq agar siz aniq mos kelmagan ma'lumotlarni ham (LEFT JOIN kabi) olmoqchi bo'lsangiz, o'zingiz tanlash huquqiga egasiz! Buni `@source` ichida bajarilib:
+`"@source": "positionCteTable[is_current: true, $join: ->]"` yoki to'liq so'z orqali `"$join: LEFT"` deb berSangiz kifoya qilingan. Boshqa operatorlar (`<-`, `-><-`) ham tegishli ulanish turini o'zgartiradi. Endi ustunlik sizning qo'lingizda!
 
-| Operator | Ma'nosi          | Misol                   |
-|----------|------------------|-------------------------|
-| `:`      | Teng (=)         | `status: 1`             |
-| `!:`     | Teng emas (!=)   | `status: !: 0`          |
-| `>`      | Katta (>)        | `age: > 18`             |
-| `<`      | Kichik (<)       | `age: < 65`             |
-| `..`     | Oraliq (between) | `id: 1..45`             |
-| `~`      | O'xshash (like)  | `name: ~ Ali%`          |
-| `in`     | Ro'yxatda (in)   | `rank_id: in (1, 2, 3)` |
+**Ikkinchi Qadam: Obyekt ichida qo'shimcha ifodalar (`@fields` obyekti) bilan**  
+Agar faqat o'zingiz yozgan qaytish formatni (Masalan frontda sanani vizualizatsiya qilish kabi ifodalarni) qat'iy o'zlashtirish uchun:
 
-
-**Paginate va saralash uchun maxsus konfiguratsiya parametrlari (`$` bilan boshlanadi):**
-
-| Parametr  | Vazifasi                       | Misol             |
-|-----------|--------------------------------|-------------------|
-| `$limit`  | Qaytariladigan qatorlar soni   | `$limit: 50`      |
-| `$offset` | Boshlang'ich o'tkazib yuborish | `$offset: 100`    |
-| `$order`  | Tartiblash                     | `$order: id DESC` |
-| `$join`   | Ulash turini o'zgartirish.     | `$left: LEFT`     |
-
-```json
-"@source": "emp[status: 1, age: >25, type: in (1, 2), id: 1..100, $join: RIGHT]"
-```
-
-**3. Nested Fetching (Bog'langan Jadvallarni olish)**
-Relations configuration-da ulab qo'yilgan bo'lsa, o'zaro nom chaqirilishi kifoya. (Ro'yxat bo'lsa `[]` qo'shiladi):
 ```json
 {
   "@data": {
-    "@source": "profiles[id: 12, is_active: true]",
-    "@fields": ["*"],
-    "employee_info": {
-      "@source": "emp[status: 1]",
-      "@fields": { "fullName": "full_name" },
-      "organization": {
-        "@source": "org[status: 1]",
-        "@flatten": true,
-        "@fields": { "name": "name" }
-      }
-    }
-  }
-}
-```
-
-**4. Obyekt (Strict Overwrite) va Custom SQL Funksiyalar**
-`@fields` kaliti ichiga oddiy massiv o'rniga Obyekt ifodalansa u strikt rejimida ishlaydi, ya'ni faqat o'zi aytgan so'rovni chiqaradi. Uning ichida avtomatik o'zgaruvchilarga asoslangan Funksiyalar ifodalash mumkin:
-```json
-{
-  "@data": {
-    "@source": "emp",
+    "@source": "profile",
     "@fields": {
-      "full_name_from_frontend": "CONCAT(first_name, ' ', last_name)",
-      "custom_date": "TO_CHAR(TO_TIMESTAMP(created_at), 'DD.MM.YYYY')"
+      "front_id": "id",
+      "sana": "TO_CHAR(TO_TIMESTAMP(created_time), 'DD.MM.YYYY')" 
     }
   }
 }
 ```
+
+**Uchinchi Qadam: Ichma-ich Array (One-to-Many qilib ko'tarish) va Flatten**
+Agar xodimga va uning qo'shimcha ro'yxat shaklidagi `positions` hamda `educations` lariga ehtiyoj bo'lsa:
+```json
+{
+  "@data": {
+    "@source": "emp[status: 1]",
+    "@fields": { "id": "id", "full_name": "full_name" },
+    
+    "positions[]": {
+      "@source": "department_staff_position[is_current: true]",
+      "@fields": {
+        "id": "id",
+        "begin_date": "TO_CHAR(TO_TIMESTAMP(start_time), 'DD.MM.YYYY')"
+      },
+      "ishJoyi": {
+        "@source": "org[status: 1]",
+        "@flatten": true, 
+        "@fields": {
+          "viloyat_boshqarmasi": "name"
+        }
+      }
+    },
+    
+    "educations[]": {
+       "@source": "education[$limit: 10, $order: id DESC]",
+       "@fields": {
+          "id": "unique",
+          "diploma_type": "diploma_name"
+       }
+    }
+  }
+}
+```
+
+
 
 ---
 
-## 4. Macro Filtering (Overriding) xususiyati
+## 🏆 E'tibor beriladigan afzalliklar (Why UAQ?)
 
-Agar Macro ichida oldindan yozib qo'yilgan Array fieldlar (`@fields: ["*"]`) kelsa-yu, Frontend ularni ishlatish uchun qayta murojaat qilsa, tizim gibrid-konvergensiya qilmaydi. Agar Obyekt orqali so'ralsa barchasi Qat'iy O'chish (Overwrite) orqali shakllanadi va Frontend NIMA SO'RASA SHUNI OLADI.
-
-**Misol:**
-```json
-{
-  "@data": {
-    "position": {
-      "@source": "virtualPosition",
-      "@fields": {
-         "my_custom_concat": "CONCAT(organization_name, ' - ', department_name)"
-      }
-    }
-  }
-}
-```
-**Natija:**
-Mantiq bo'yicha oldindan `id`, `status`, `is_current` chiqishi va uning orqasidan `organization_name` va `department_name` ham flatten orqali javobga birikib ketishi belgilangan bo'lsa-da, Frontend `@fields` ga obyekti bilan aralashgani uchun faqatgina **`my_custom_concat`** ni oladi, eski ma'lumotlar e'tiborsiz qoldiriladi. Tizimda keraksiz ma'lumot ("over-fetching") bo'lmaydi.
+- **Sekiroz Data Parsing**: Tizim to'gridan to'gri PostgreSQL kuchi bilan Serverga bog'langan eng optimal JSON generator strukturasida javob jo'natadi, buning uchun ORM/SQL Query builderlarni "kuzatib yotish" necha o'nlab MB backend server operativ xotirasini tejaydi.
+- **Auto-Join Tizimi**: O'rtada yuzlab ulanadigan qidiruv jadvali bo'lsa ham (A -> C), siz faqat so'rang, UAQ avtomat eng qisqa yo'lni qidirib (A -> B -> C) graflar mantiqida ulashadi.
+- **Nol (Zero) SQL Kiritish Xavfi (No SQL Injection)**: Yuborayotgan barcha filtrlar qat'iy tahlil qilinib `PDO / Prepared Statement` formatiga tushadi. Qo'shimchasiga Frontend tomondan berilayotgan barcha operatorlar tekshiriladi va xatar chaqirilsa qattiq rad etiladi.  
