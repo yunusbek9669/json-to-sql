@@ -35,6 +35,8 @@ pub struct QueryNode {
     pub children: Vec<QueryNode>,
     /// Query mode: "list" (default), "count", "first"
     pub mode: Option<String>,
+    /// Whether this node was part of a Macro expansion
+    pub from_macro: bool,
 }
 
 #[derive(Debug, Serialize)]

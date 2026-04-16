@@ -166,6 +166,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
         fields: IndexMap::new(),
         children: Vec::new(),
         mode: None,
+        from_macro: in_macro,
     };
     
     for (k, v) in &working_map {
@@ -217,6 +218,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
                             fields: IndexMap::new(),
                             children: Vec::new(),
                             mode: None,
+                            from_macro: in_macro,
                         };
                         for (idx, item) in arr.iter().enumerate() {
                             if let Value::Object(item_map) = item {

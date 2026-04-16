@@ -59,15 +59,51 @@ impl SqlGenerator {
         }
         
         let mut local_aliases = std::collections::HashMap::new();
+        let mut processed_children = std::collections::HashMap::new();
+
+        // --- PRIORITY JOIN RESOLUTION ---
+        let mut join_resolutions: std::collections::HashMap<String, (Option<String>, u8)> = std::collections::HashMap::new();
         for child in &node.children {
-            if child.flatten && !child.is_list {
-                let c_alias = child.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or(child.name.as_str());
-                for (f_k, f_v) in &child.fields {
-                    if f_v != "*" {
-                        let expanded_f_v = self.guard.expand_mapped_fields(f_v, c_alias);
-                        let processed = Guard::auto_prefix_field(&expanded_f_v, c_alias, None);
-                        local_aliases.insert(f_k.clone(), processed);
+            if let (Some(src), false) = (&child.source, child.is_list) {
+                let priority = if !src.from_macro && src.join_type.is_some() { 1 } 
+                              else if src.from_macro && src.join_type.is_some() { 2 } 
+                              else { 3 };
+                let entry = join_resolutions.entry(src.table_name.clone()).or_insert((src.join_type.clone(), priority));
+                if priority < entry.1 { *entry = (src.join_type.clone(), priority); }
+            }
+        }
+
+        // --- PASS 1: Child Processing ---
+        for child in &node.children {
+            let mut nc = child.clone();
+            if let Some(src) = &mut nc.source {
+                if let Some((best_jt, _)) = join_resolutions.get(&src.table_name) {
+                    if best_jt.is_some() { src.join_type = best_jt.clone(); }
+                }
+            }
+
+            if nc.is_list {
+                let list_result = self.build_lateral_subquery(&nc, &current_alias, &current_real)?;
+                let lateral_alias = format!("{}_list", nc.name);
+                self.joins.push(format!("LEFT JOIN LATERAL (\n  {}\n) {} ON true", list_result.sql, lateral_alias));
+                processed_children.insert(nc.name.clone(), (format!("{}.array_data", lateral_alias), false));
+            } else {
+                let child_args = self.process_node(&nc, Some((&current_alias, &current_real)))?;
+                let c_alias = nc.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or(nc.name.as_str());
+                
+                if nc.flatten {
+                    for (f_k, f_v) in &nc.fields {
+                        if f_v != "*" {
+                            let expanded_f_v = self.guard.expand_mapped_fields(f_v, c_alias);
+                            let processed = Guard::auto_prefix_field(&expanded_f_v, c_alias, None);
+                            local_aliases.insert(f_k.clone(), processed);
+                        }
                     }
+                    processed_children.insert(nc.name.clone(), (child_args.join(", "), true));
+                } else {
+                    let child_sql = format!("json_build_object({})", child_args.join(", "));
+                    local_aliases.insert(nc.name.clone(), child_sql.clone());
+                    processed_children.insert(nc.name.clone(), (child_sql, false));
                 }
             }
         }
@@ -108,46 +144,40 @@ impl SqlGenerator {
             }
         }
         
-        // --- PRIORITY JOIN RESOLUTION ---
-        let mut join_resolutions: std::collections::HashMap<String, (Option<String>, u8)> = std::collections::HashMap::new();
-        for child in &node.children {
-            if let (Some(src), false) = (&child.source, child.is_list) {
-                let priority = if !src.from_macro && src.join_type.is_some() { 1 } 
-                              else if src.from_macro && src.join_type.is_some() { 2 } 
-                              else { 3 };
-                let entry = join_resolutions.entry(src.table_name.clone()).or_insert((src.join_type.clone(), priority));
-                if priority < entry.1 { *entry = (src.join_type.clone(), priority); }
+        // --- FINAL ASSEMBLY ---
+        let mut used_children = std::collections::HashSet::new();
+        // Identify which non-list, non-flattened children were already used in @fields
+        for (_, field_sql) in &node.fields {
+            if let Some((name, _)) = processed_children.iter().find(|(k, (_, flat))| !*flat && field_sql == *k) {
+                used_children.insert(name.clone());
             }
         }
 
-        // Process children
-        for child in &node.children {
-            let mut nc = child.clone();
-            if let Some(src) = &mut nc.source {
-                if let Some((best_jt, _)) = join_resolutions.get(&src.table_name) {
-                    if best_jt.is_some() { src.join_type = best_jt.clone(); }
+        if has_star || node.fields.is_empty() {
+            // Include everything from children that wasn't flattened OR was flattened but user asked for '*'
+            for child in &node.children {
+                if let Some((child_sql, is_flat)) = processed_children.get(&child.name) {
+                    if *is_flat {
+                        if (!child.from_macro || has_star) && !child_sql.is_empty() {
+                            json_args.push(child_sql.clone());
+                        }
+                    } else if !used_children.contains(&child.name) {
+                        json_args.push(format!("'{}', {}", escape_sql_key(&child.name), child_sql));
+                    }
                 }
             }
-
-            if nc.is_list {
-                let list_result = self.build_lateral_subquery(&nc, &current_alias, &current_real)?;
-                let lateral_alias = format!("{}_list", nc.name);
-                self.joins.push(format!("LEFT JOIN LATERAL (\n  {}\n) {} ON true", list_result.sql, lateral_alias));
-                json_args.push(format!("'{}', {}.array_data", escape_sql_key(&nc.name), lateral_alias));
-            } else {
-                // If this child targets an alias already joined by a previous sibling, 
-                // but this child has the BETTER join type, we should have processed it first.
-                // To solve this simply: if child targets a shared alias and is Priority 1, 
-                // we should "inject" its join before others.
-                
-                // WAIT! A much simpler fix: just sort children by priority before processing.
-                // But we need to keep output JSON in same order. 
-                // So we'll process them in original order, but the FIRST time an alias is joined, 
-                // it will use the Best Join Type discovered in the pre-scan above.
-            
-                let child_args = self.process_node(&nc, Some((&current_alias, &current_real)))?;
-                if nc.flatten && has_star { json_args.extend(child_args); }
-                else if !nc.flatten { json_args.push(format!("'{}', json_build_object({})", escape_sql_key(&nc.name), child_args.join(", "))); }
+        } else {
+            // Strict selection: only automatically include explicit nodes (not from macro)
+            for child in &node.children {
+                if let Some((child_sql, is_flat)) = processed_children.get(&child.name) {
+                    if *is_flat {
+                        if !child.from_macro && !child_sql.is_empty() {
+                            json_args.push(child_sql.clone());
+                        }
+                    } else if !child.from_macro && !used_children.contains(&child.name) {
+                        json_args.push(format!("'{}', {}", escape_sql_key(&child.name), child_sql));
+                    }
+                }
             }
         }
         Ok(json_args)
@@ -187,6 +217,39 @@ impl SqlGenerator {
             let child_args = self.process_node(&nc, Some((child_alias, &real_table)))?;
             if nc.flatten { inner_args.extend(child_args); }
             else { inner_args.push(format!("'{}', json_build_object({})", escape_sql_key(&nc.name), child_args.join(", "))); }
+        }
+        
+        
+        for (field_key, field_sql) in &node.fields {
+            if field_sql == "*" {
+                let mut expanded = Vec::new();
+                let mut use_rtj = false;
+                if let Some(wl) = &self.guard.whitelist {
+                    if let Some(rule) = wl.get(child_alias) {
+                        if rule.is_allowed("*") { use_rtj = true; }
+                        else {
+                            match rule {
+                                crate::guard::WhitelistRule::Mapping(map) => for (k, v) in map { expanded.push((k.clone(), v.clone())); },
+                                crate::guard::WhitelistRule::Allowed(set) => for k in set { expanded.push((k.clone(), k.clone())); }
+                            }
+                        }
+                    } else { return Err(format!("Table '{}' not in whitelist", child_alias)); }
+                } else { use_rtj = true; }
+
+                if use_rtj { inner_args.push(format!("'{}', row_to_json({})", escape_sql_key(field_key), child_alias)); }
+                else {
+                    for (k, sql_val) in expanded {
+                        let exp = self.guard.expand_mapped_fields(&sql_val, child_alias);
+                        let proc = Guard::auto_prefix_field(&exp, child_alias, None);
+                        inner_args.push(format!("'{}', {}", escape_sql_key(&k), proc));
+                    }
+                }
+            } else {
+                self.guard.validate_field(child_alias, field_sql, None)?;
+                let exp = self.guard.expand_mapped_fields(field_sql, child_alias);
+                let proc = Guard::auto_prefix_field(&exp, child_alias, None);
+                inner_args.push(format!("'{}', {}", escape_sql_key(field_key), proc));
+            }
         }
         
         let inner_joins = std::mem::replace(&mut self.joins, old_joins);
