@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::parser;
 use crate::generator;
 use crate::info; // from info.rs
+use crate::format::process_files_in_json;
 
 use indexmap::IndexMap;
 
@@ -144,6 +145,54 @@ pub(crate) fn create_error_result(msg: &str) -> *mut c_char {
         "message": msg
     });
     encode_result(err_json)
+}
+
+/// A utility function to convert string paths into base64 embedded files.
+/// `json_result` should be the actual data from the database.
+/// `root_files_path` absolute directory path for files (e.g. "/var/www/uploads")
+/// `trigger_prefix` an exact string indicating which strings to process (e.g. "/web/uploads/")
+#[unsafe(no_mangle)]
+pub extern "C" fn uaq_inject_base64_files(
+    json_result: *const c_char,
+    root_files_path: *const c_char,
+    trigger_prefix: *const c_char
+) -> *mut c_char {
+    if json_result.is_null() || root_files_path.is_null() || trigger_prefix.is_null() {
+        return create_error_result("Arguments cannot be null");
+    }
+
+    let c_json = unsafe { CStr::from_ptr(json_result) };
+    let json_str = match c_json.to_str() {
+        Ok(s) => s,
+        Err(_) => return create_error_result("Invalid UTF-8 in json_result"),
+    };
+
+    let mut parsed_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return create_error_result("Invalid JSON format in json_result"),
+    };
+
+    let c_root = unsafe { CStr::from_ptr(root_files_path) };
+    let root_str = match c_root.to_str() {
+        Ok(s) => s,
+        Err(_) => return create_error_result("Invalid UTF-8 in root_files_path"),
+    };
+
+    let c_trigger = unsafe { CStr::from_ptr(trigger_prefix) };
+    let trigger_str = match c_trigger.to_str() {
+        Ok(s) => s,
+        Err(_) => return create_error_result("Invalid UTF-8 in trigger_prefix"),
+    };
+
+    // Traverse the JSON and replace strings starting with trigger_str
+    process_files_in_json(&mut parsed_json, root_str, trigger_str);
+
+    let serialized = match serde_json::to_string(&parsed_json) {
+        Ok(s) => s,
+        Err(e) => return create_error_result(&format!("Serialization Error: {}", e)),
+    };
+
+    CString::new(serialized).unwrap().into_raw()
 }
 
 fn encode_result(val: serde_json::Value) -> *mut c_char {

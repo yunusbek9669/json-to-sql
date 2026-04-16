@@ -4,5 +4,6 @@ pub mod generator;
 pub mod guard;
 pub mod info;
 pub mod api;
+pub mod format;
 
 pub use api::{uaq_parse, uaq_free_string};

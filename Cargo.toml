@@ -10,6 +10,7 @@ regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 indexmap = { version = "2.0.2", features = ["serde"] }
+base64 = "0.22.1"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
