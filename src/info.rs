@@ -165,6 +165,15 @@ joined_schema AS (
             WHEN pc.real_col ~* '::(numeric|decimal|real|double)' THEN 'numeric'
             WHEN pc.real_col ~* '^(COUNT|SUM|AVG|MIN|MAX)\(' THEN 'numeric'
             WHEN pc.real_col = '____JSON____' THEN 'json'
+            WHEN pc.real_col ~* '^EXISTS\s*\(' THEN 'boolean'
+            WHEN pc.real_col ~* '^NOT\s+EXISTS\s*\(' THEN 'boolean'
+            WHEN pc.real_col ~* '^(TO_CHAR|CONCAT|CONCAT_WS|UPPER|LOWER|TRIM|LTRIM|RTRIM|LPAD|RPAD|LEFT|RIGHT|REPLACE|SUBSTRING|INITCAP|REVERSE|REPEAT|MD5|FORMAT)\s*\(' THEN 'character varying'
+            WHEN pc.real_col ~* '^(EXTRACT|DATE_PART|LENGTH|CHAR_LENGTH|POSITION|STRPOS|ASCII)\s*\(' THEN 'numeric'
+            WHEN pc.real_col ~* '^(TO_TIMESTAMP|TO_DATE|NOW|CURRENT_TIMESTAMP|CURRENT_DATE)' THEN 'timestamp'
+            WHEN pc.real_col ~* '^(ARRAY_AGG|ARRAY\[)' THEN 'array'
+            WHEN pc.real_col ~* '^(JSONB_BUILD_OBJECT|JSONB_AGG|JSON_BUILD_OBJECT|JSON_AGG|ROW_TO_JSON|TO_JSONB|JSON_BUILD_ARRAY|JSONB_BUILD_ARRAY)\s*\(' THEN 'json'
+            WHEN pc.real_col ~* '^(BOOL_AND|BOOL_OR|EVERY)\s*\(' THEN 'boolean'
+            WHEN pc.real_col ~* '^COALESCE\s*\(' AND pc.real_col ~* '(true|false)' THEN 'boolean'
             WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'expression' 
             ELSE COALESCE(c.data_type, 'virtual') 
         END AS data_type

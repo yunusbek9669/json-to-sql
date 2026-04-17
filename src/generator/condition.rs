@@ -4,10 +4,18 @@ use crate::guard::Guard;
 use super::SqlGenerator;
 
 impl SqlGenerator {
-    pub(crate) fn build_condition(&mut self, table_alias: &str, filter: &FilterRule) -> Result<String, String> {
-        self.guard.validate_column(table_alias, &filter.field)?;
+    pub(crate) fn build_condition(&mut self, table_alias: &str, filter: &FilterRule, node_fields: Option<&indexmap::IndexMap<String, String>>) -> Result<String, String> {
+        let is_macro_field = node_fields.map_or(false, |f| f.contains_key(&filter.field));
         
-        let expanded_field = self.guard.expand_mapped_fields(&filter.field, table_alias);
+        let expanded_field = if is_macro_field {
+            let expr = node_fields.unwrap().get(&filter.field).unwrap();
+            self.guard.validate_field(table_alias, expr, None)?;
+            self.guard.expand_mapped_fields(expr, table_alias)
+        } else {
+            self.guard.validate_column(table_alias, &filter.field)?;
+            self.guard.expand_mapped_fields(&filter.field, table_alias)
+        };
+        
         let column_ref = Guard::auto_prefix_field(&expanded_field, table_alias, None);
         
         match filter.operator.as_str() {

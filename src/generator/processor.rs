@@ -52,7 +52,7 @@ impl SqlGenerator {
             }
             if context.is_none() || !node.is_list {
                 for filter in &source.filters {
-                    let condition = self.build_condition(&current_alias, filter)?;
+                    let condition = self.build_condition(&current_alias, filter, Some(&node.fields))?;
                     self.wheres.push(condition);
                 }
             }
@@ -264,7 +264,7 @@ impl SqlGenerator {
             match res { Some(r) => extract_on_condition(&r)?, None => return Err(format!("No rel for {}->{}", parent_alias, child_alias)) }
         };
         let mut where_parts = vec![join_condition];
-        for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter)?); }
+        for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?); }
         where_parts.extend(inner_wheres);
         
         let mut inner_sql = format!("SELECT {} AS item\n    FROM {} AS {}", json_obj, real_table, child_alias);
