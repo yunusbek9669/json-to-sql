@@ -86,7 +86,7 @@ impl Guard {
             "DESC", "ASC", "NULLS", "FIRST", "LAST", "BETWEEN", "LIKE", "ILIKE", "DISTINCT", "ALL", "ANY",
             "EXISTS", "HAVING", "GROUP", "BY", "ORDER", "LIMIT", "OFFSET", "UNION", "INTERSECT", "EXCEPT",
             "FILTER", "OVER", "PARTITION", "WINDOW", "ROWS", "RANGE", "UNBOUNDED", "PRECEDING", "FOLLOWING",
-            "MALE", "FEMALE"
+            "MALE", "FEMALE", "SELECT", "WHERE", "ON", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "WITH"
         ];
 
         let mut result = String::with_capacity(field_sql.len() + 20);
