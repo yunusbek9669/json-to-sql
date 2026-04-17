@@ -29,7 +29,6 @@ pub struct QueryNode {
     pub name: String,
     pub is_list: bool,
     pub source: Option<SourceDef>,
-    pub join: Option<String>,
     pub flatten: bool,
     pub fields: IndexMap<String, String>,
     pub children: Vec<QueryNode>,

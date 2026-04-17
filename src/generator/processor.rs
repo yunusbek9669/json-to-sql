@@ -34,8 +34,7 @@ impl SqlGenerator {
                     let is_numeric = node.name.chars().all(|c| c.is_numeric());
                     let rel_hint = if is_numeric { &source.table_name } else { &node.name };
                     let rel_name = source.rel.as_deref().unwrap_or(rel_hint);
-                    let j_str = if let Some(j) = &node.join { Some(j.clone()) } 
-                                 else { self.resolve_relation(p_alias, &current_alias, p_real, &current_real, rel_name)? };
+                    let j_str = self.resolve_relation(p_alias, &current_alias, p_real, &current_real, rel_name)?;
 
                     if let Some(mut j) = j_str {
                         if let Some(jt) = &source.join_type {
@@ -258,8 +257,7 @@ impl SqlGenerator {
         self.joined_aliases = old_aliases;
         
         let json_obj = format!("json_build_object({})", inner_args.join(", "));
-        let join_condition = if let Some(j) = &node.join { extract_on_condition(j)? }
-        else {
+        let join_condition = {
             let res = self.resolve_relation(parent_alias, child_alias, parent_real, &real_table, &node.name)?;
             match res { Some(r) => extract_on_condition(&r)?, None => return Err(format!("No rel for {}->{}", parent_alias, child_alias)) }
         };

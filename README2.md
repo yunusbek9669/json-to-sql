@@ -71,9 +71,8 @@ Root kalit uchta variantdan biri bo'lishi mumkin:
 | Direktiva  | Vazifasi                                         | Majburiy |
 |------------|--------------------------------------------------|----------|
 | `@source`  | Manba jadval, filtrlar va konfiguratsiya         | Ha       |
-| `@fields`  | Qaytariladigan maydonlar va ularni nomlash        | Yo'q     |
+| `@fields`  | Qaytariladigan maydonlar va ularni nomlash       | Yo'q     |
 | `@flatten` | Bola node maydonlarini ota nodega qo'shib beradi | Yo'q     |
-| `@join`    | Qo'lda JOIN yozish (relations berilmasa)         | Yo'q     |
 | `@extend`  | Makrosni kengaytirish                            | Yo'q     |
 | `[]`       | Kalit oxiriga qo'shilsa — massiv qaytaradi       | Yo'q     |
 
@@ -220,8 +219,8 @@ Jadvallar orasidagi bog'lanishni bir marta yozasiz. Engine so'rovda kerak bo'lga
 
 ```json
 {
-  "emp->emp_rel_org": "LEFT JOIN @table ON @2.employee_id = @1.id",
-  "emp_rel_org->org": "LEFT JOIN @table ON @2.id = @1.organization_id AND @1.status = 1"
+  "emp->emp_rel_org": "@join @table ON @2.employee_id = @1.id",
+  "emp_rel_org->org": "@join @table ON @2.id = @1.organization_id AND @1.status = 1"
 }
 ```
 
@@ -229,6 +228,7 @@ Jadvallar orasidagi bog'lanishni bir marta yozasiz. Engine so'rovda kerak bo'lga
 
 | Placeholder | Ma'nosi                           |
 |-------------|-----------------------------------|
+| `@join`     | Join turi SQL nomi                |
 | `@table`    | Child jadvalning haqiqiy SQL nomi |
 | `@1`        | Kalitnng birinchi alias           |
 | `@2`        | Kalitning ikkinchi alias          |

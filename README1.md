@@ -236,6 +236,7 @@ Jadvallar orasidagi bog'lanishni bir marta yozasiz — Engine zarur bo'lganda av
 
 | Placeholder | Ma'nosi                                                    |
 |-------------|------------------------------------------------------------|
+| `@join`     | Join turi (LEFT, RIGHT, INNER, FULL) nomi                  |
 | `@table`    | Child jadvalning haqiqiy SQL nomi                          |
 | `@1`        | Kalitdagi birinchi alias (parent) ning haqiqiy jadval nomi |
 | `@2`        | Kalitdagi ikkinchi alias (child) ning haqiqiy jadval nomi  |
@@ -267,8 +268,8 @@ Bitta haqiqiy jadvalga ikki xil maqsadda ulanish kerak bo'lganda:
 **Relations:**
 ```json
 {
-  "dept->org":      "INNER JOIN @table ON @1.viloyat_id = @2.id",
-  "dept->innerOrg": "INNER JOIN @table ON @1.tuman_id = @2.id"
+  "dept->org":      "@join @table ON @1.viloyat_id = @2.id",
+  "dept->innerOrg": "@join @table ON @1.tuman_id = @2.id"
 }
 ```
 
@@ -429,7 +430,6 @@ Root kalit quyidagi uchta variantdan biri:
 | `@source`  | Manba jadval (alias), filtrlar va konfiguratsiya        | Ha       |
 | `@fields`  | Qaytariladigan maydonlar va ularni nomlash              | Yo'q     |
 | `@flatten` | Bola node maydonlarini ota nodega birlashtirib yuborish | Yo'q     |
-| `@join`    | Qo'lda JOIN sintaksisi (relations berilmagan hollarda)  | Yo'q     |
 | `[]`       | Kalit oxiriga qo'shilsa — massiv (array) qaytaradi      | Yo'q     |
 
 #### `@source` Sintaksisi
@@ -679,24 +679,7 @@ Flattenli:   { "degree": { "id": 5, "name": "Kapitan" } }
 }
 ```
 
-> `has_children: true` — bu virtual (expression) maydon bo'lsada, frontend oddiy ustundek filtr sifatida ishlatadi.
-
-#### Namuna 6: Macro Ishlatish
-
-```json
-{
-  "@data[]": {
-    "@source": "activeEmployee[id: 100..500, $limit: 10]",
-
-    "positions[]": {
-      "@source": "positionCteTable[is_current: true, $limit: 5]",
-      "@fields": { "id": "id", "begin_date": "start_time" }
-    }
-  }
-}
-```
-
-#### Namuna 7: Tizim Strukturasini O'qish
+#### Namuna 6: Tizim Strukturasini O'qish
 
 ```json
 { "@info": ["@tables", "@relations"] }
@@ -776,7 +759,7 @@ UAQ Engine ko'p qatlamli xavfsizlik tizimiga ega:
 | **Global Tahdid Detektori**     | `DROP`, `DELETE`, `--`, `/* */` kabi xavfli konstruktsiyalar qat'iy bloklanadi                           |
 | **Funksiya Ro'yxati**           | Faqat ruxsat etilgan SQL funksiyalar: `CONCAT`, `TO_CHAR`, `COALESCE`, `CASE WHEN`, `EXISTS` va hokazo   |
 | **Identifikator Validatsiyasi** | Jadval va ustun nomlari `[a-zA-Z0-9_]` dan tashqari belgilarni qabul qilmaydi                            |
-| **Alias Majbuviyati**           | Whitelist'da alias berilgan jadvalga frontend to'g'ridan-to'g'ri haqiqiy nom bilan murojaat qila olmaydi |
+| **Alias Majburiyati**           | Whitelist'da alias berilgan jadvalga frontend to'g'ridan-to'g'ri haqiqiy nom bilan murojaat qila olmaydi |
 
 ---
 

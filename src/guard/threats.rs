@@ -11,13 +11,17 @@ impl Guard {
 
         // Block structural manipulation and multi-queries
         let bad_words = [
-            "DROP ", "DELETE ", "UPDATE ", "INSERT ", "EXEC ", "TRUNCATE ", 
-            "ALTER ", "GRANT ", "REVOKE ", "UNION "
+            "DROP ", "DELETE ", "UPDATE ", "INSERT ", "EXEC ", "TRUNCATE ",
+            "ALTER ", "GRANT ", "REVOKE ", "UNION ", "UNION(",
+            "INTO ", "LOAD_FILE", "OUTFILE", "DUMPFILE",
+            "PG_SLEEP", "PG_READ", "PG_WRITE", "PG_STAT",
+            "INFORMATION_SCHEMA", "PG_CATALOG",
+            "COPY ", "EXECUTE ", "PERFORM "
         ];
         
         for word in bad_words {
             if upper.contains(word) {
-                return Err(format!("Forbidden SQL operation detected: {}", word));
+                return Err(format!("Forbidden SQL operation detected: {}", word.trim()));
             }
         }
         

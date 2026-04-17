@@ -157,7 +157,6 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
         name: clean_name,
         is_list,
         source: None,
-        join: None,
         flatten: false,
         fields: IndexMap::new(),
         children: Vec::new(),
@@ -190,7 +189,6 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
                 }
             }
             "@mode" => { if let Value::String(s) = v { node.mode = Some(s.to_lowercase()); } }
-            "@join" => { if let Value::String(j) = v { node.join = Some(j.clone()); } }
             "@fields" => {
                 if let Value::Object(fm) = v {
                     for (fk, fv) in fm { if let Value::String(fvs) = fv { node.fields.insert(fk.clone(), fvs.clone()); } }
@@ -209,7 +207,6 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
                             name: k.clone(),
                             is_list: k.ends_with("[]"),
                             source: None,
-                            join: None,
                             flatten: false,
                             fields: IndexMap::new(),
                             children: Vec::new(),

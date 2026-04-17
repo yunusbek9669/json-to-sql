@@ -104,8 +104,9 @@ impl Guard {
             if !builtins.contains(&func_name.as_str()) {
                 return Err(format!("Unsafe or unsupported function call: {}", func_name));
             }
-            if field_upper.contains("SELECT ") {
-                return Err("Subqueries are not allowed inside functions".to_string());
+            // Subqueries are never allowed in frontend @fields
+            if field_upper.contains("SELECT ") || field_upper.contains("SELECT(") {
+                return Err("Subqueries are not allowed in field expressions".to_string());
             }
         } else {
             // 3. Allow constants or identifiers
