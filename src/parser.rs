@@ -86,8 +86,6 @@ fn parse_operator_and_value(input: &str) -> (String, String) {
 
 fn merge_json_objects(base: &mut serde_json::Map<String, Value>, override_map: &serde_json::Map<String, Value>) {
     for (k, v) in override_map {
-        if k == "@extend" { continue; }
-        
         let base_val = base.remove(k);
         match (base_val, v) {
             (Some(Value::Object(mut base_obj)), Value::Object(override_obj)) => {
@@ -121,9 +119,7 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
     let mut macro_overrides = None;
     let mut macro_name_opt = None;
     
-    if let Some(Value::String(m)) = working_map.get("@extend") {
-        macro_name_opt = Some(m.clone());
-    } else if let Some(Value::String(s)) = working_map.get("@source") {
+    if let Some(Value::String(s)) = working_map.get("@source") {
         let base_name = s.split('[').next().unwrap_or(s).trim();
         if macros.contains_key(base_name) {
             macro_name_opt = Some(base_name.to_string());
