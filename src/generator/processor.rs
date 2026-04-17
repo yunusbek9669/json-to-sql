@@ -50,7 +50,7 @@ impl SqlGenerator {
                     }
                 }
             }
-            if !node.is_list {
+            if context.is_none() || !node.is_list {
                 for filter in &source.filters {
                     let condition = self.build_condition(&current_alias, filter)?;
                     self.wheres.push(condition);
