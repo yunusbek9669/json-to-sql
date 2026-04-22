@@ -151,9 +151,6 @@ impl SqlGenerator {
             } else if let Some((func, filter_str, col)) = self.try_parse_local_agg(field_sql) {
                 let inline_sql = self.build_local_inline_agg(&func, filter_str, col, &current_alias, &current_real, context)?;
                 json_args.push(format!("'{}', ({})", escape_sql_key(field_key), inline_sql));
-            } else if let Some((func, src_part, fld_part)) = self.try_parse_inline_agg(field_sql) {
-                let inline_sql = self.build_inline_agg(&func, &src_part, fld_part, &current_alias, &current_real)?;
-                json_args.push(format!("'{}', ({})", escape_sql_key(field_key), inline_sql));
             } else {
                 self.guard.validate_field(&current_alias, field_sql, local_aliases_opt)?;
                 let exp = self.guard.expand_mapped_fields(field_sql, &current_alias);
@@ -268,9 +265,6 @@ impl SqlGenerator {
             } else if let Some((func, filter_str, col)) = self.try_parse_local_agg(field_sql) {
                 let inline_sql = self.build_local_inline_agg(&func, filter_str, col, child_alias, &real_table, Some((parent_alias, parent_real)))?;
                 inner_args.push(format!("'{}', ({})", escape_sql_key(field_key), inline_sql));
-            } else if let Some((func, src_part, fld_part)) = self.try_parse_inline_agg(field_sql) {
-                let inline_sql = self.build_inline_agg(&func, &src_part, fld_part, child_alias, &real_table)?;
-                inner_args.push(format!("'{}', ({})", escape_sql_key(field_key), inline_sql));
             } else {
                 self.guard.validate_field(child_alias, field_sql, None)?;
                 let exp = self.guard.expand_mapped_fields(field_sql, child_alias);
@@ -312,120 +306,6 @@ impl SqlGenerator {
 
     fn all_fields_local_agg_check(&self, fields: &indexmap::IndexMap<String, String>) -> bool {
         !fields.is_empty() && fields.values().all(|v| self.try_parse_local_agg(v).is_some())
-    }
-
-    pub(crate) fn try_parse_inline_agg(&self, field_sql: &str) -> Option<(String, String, Option<String>)> {
-        let text = field_sql.trim();
-        let lower = text.to_lowercase();
-        let func = if lower.starts_with("count(") { "COUNT" }
-                   else if lower.starts_with("sum(") { "SUM" }
-                   else if lower.starts_with("max(") { "MAX" }
-                   else if lower.starts_with("min(") { "MIN" }
-                   else if lower.starts_with("avg(") { "AVG" }
-                   else { return None; };
-
-        if !text.ends_with(')') {
-            return None;
-        }
-
-        let inner = text[text.find('(').unwrap() + 1..text.len() - 1].trim();
-
-        let mut source_part = inner;
-        let mut field_part = None;
-
-        if let Some(bracket_end) = inner.rfind(']') {
-            if let Some(dot_idx) = inner[bracket_end..].find('.') {
-                let actual_dot = bracket_end + dot_idx;
-                source_part = &inner[..actual_dot];
-                field_part = Some(inner[actual_dot + 1..].trim().to_string());
-            }
-        } else if let Some(dot_idx) = inner.find('.') {
-            source_part = &inner[..dot_idx];
-            field_part = Some(inner[dot_idx + 1..].trim().to_string());
-        }
-
-        let child_alias = source_part.split('[').next().unwrap_or(source_part).trim();
-        
-        let mut is_agg = source_part.contains('[');
-        if !is_agg {
-            if let Some(wl) = &self.guard.whitelist {
-                if wl.contains_key(child_alias) {
-                    is_agg = true;
-                }
-            }
-        }
-
-        if is_agg {
-            return Some((func.to_string(), source_part.to_string(), field_part));
-        }
-
-        None
-    }
-
-    pub(crate) fn build_inline_agg(
-        &mut self,
-        func_upper: &str,
-        source_part: &str,
-        field_part: Option<String>,
-        parent_alias: &str,
-        parent_real: &str,
-    ) -> Result<String, String> {
-        let src = crate::parser::parse_source(source_part);
-        self.guard.validate_table(&src.table_name)?;
-        let child_real = self.guard.resolve_alias(&src.table_name)?;
-        let child_alias = &src.table_name;
-
-        if func_upper != "COUNT" && field_part.is_none() {
-            return Err(format!("Field is required for {} aggregation", func_upper));
-        }
-
-        let agg_expr = if let Some(f) = &field_part {
-            self.guard.validate_column(child_alias, f)?;
-            let expanded = self.guard.expand_mapped_fields(f, child_alias);
-            let prefixed = Guard::auto_prefix_field(&expanded, child_alias, None);
-            format!("{}({})", func_upper, prefixed)
-        } else {
-            "COUNT(*)".to_string()
-        };
-
-        let rel_result = self.resolve_relation(parent_alias, child_alias, parent_real, &child_real, child_alias)?;
-        let on_condition = match rel_result {
-            Some(r) => extract_on_condition(&r)?,
-            None => {
-                if let Some(path) = self.find_relation_path(parent_alias, child_alias) {
-                    if path.len() == 2 {
-                        let from_real = self.guard.resolve_alias(&path[0])?;
-                        let to_real   = self.guard.resolve_alias(&path[1])?;
-                        let r = self.resolve_relation(&path[0], &path[1], &from_real, &to_real, &path[1])?
-                            .ok_or_else(|| format!("No relation for inline agg {}->{}", path[0], path[1]))?;
-                        extract_on_condition(&r)?
-                    } else {
-                        return Err(format!("Inline agg: multi-hop path not supported for {}->{}", parent_alias, child_alias));
-                    }
-                } else {
-                    return Err(format!("No relation found for inline agg: {}->{}", parent_alias, child_alias));
-                }
-            }
-        };
-
-        let mut extra_wheres = Vec::new();
-        for filter in &src.filters {
-            let cond = self.build_condition(child_alias, filter, None)?;
-            extra_wheres.push(cond);
-        }
-
-        let table_expr = if *child_real == *child_alias {
-            child_real.clone()
-        } else {
-            format!("{} AS {}", child_real, child_alias)
-        };
-
-        let mut where_clause = on_condition;
-        if !extra_wheres.is_empty() {
-            where_clause = format!("{} AND {}", where_clause, extra_wheres.join(" AND "));
-        }
-
-        Ok(format!("SELECT {} FROM {} WHERE {}", agg_expr, table_expr, where_clause))
     }
 
     // Returns (parent_col, child_col, fields: Vec<(output_key, column_name)>, is_json)
@@ -642,9 +522,14 @@ impl SqlGenerator {
                 }
             } else { return None; }
         } else {
+            // Reject patterns like "education.col" or "education[filter]" where the first
+            // token is a known table alias — these are not valid column names for local agg.
             let first_token = inner.split('.').next().unwrap_or(inner);
-            let is_in_whitelist = self.guard.whitelist.as_ref().map(|wl| wl.contains_key(first_token)).unwrap_or(false);
-            if is_in_whitelist {
+            let base_name   = first_token.split('[').next().unwrap_or(first_token);
+            let is_table = self.guard.whitelist.as_ref()
+                .map(|wl| wl.contains_key(base_name))
+                .unwrap_or(false);
+            if is_table {
                 return None;
             }
             col = Some(inner.to_string());

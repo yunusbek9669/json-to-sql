@@ -449,3 +449,4 @@ fn test_security_fix_10_local_alias() {
     assert!(sql.contains("pos.name_latin"), "alias must be substituted");
     assert!(!sql.contains("emp.title"), "raw alias key must not appear as emp column");
 }
+

@@ -662,26 +662,6 @@ Agar bir node'ning **barcha** `@fields` qiymatlari aggregate funksiya bo'lsa va 
 
 ---
 
-#### 5.3. Inline (Cross-Table) Aggregat Funksiyalar
-
-Boshqa jadvaldan (whitelist'dagi istalgan jadval) aggregate hisoblash:
-
-```
-func([filter].col)@jadval_alias[qo'shimcha_filtr]
-```
-
-```json
-"@fields": {
-  "positions_count":   "COUNT()@departmentStaffPosition[status: 1]",
-  "edu_count":         "COUNT()@education[status: 1]",
-  "max_salary":        "MAX([active: 1].salary)@salaryHistory",
-  "total_bonus":       "SUM([year: 2024].amount)@bonuses"
-}
-```
-
-Har biri mustaqil correlated subquery sifatida generatsiya qilinadi.
-
----
 
 ### 6. Amaliy Misollar
 
@@ -1421,8 +1401,6 @@ alias[
   "chiqish_nomi": "min(col)",
   "chiqish_nomi": "sum([field: value].col)",
   "chiqish_nomi": "avg([field: value].col)",
-  "chiqish_nomi": "COUNT()@boshqa_jadval[filter]",
-  "chiqish_nomi": "SUM()@boshqa_jadval[filter].ustun"
 }
 ```
 
