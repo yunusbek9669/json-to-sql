@@ -200,8 +200,8 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
             _ => {
                 if !k.starts_with('@') {
                     if let Value::Object(child_map) = v {
-                        let child = parse_query_node(k, child_map, macros, current_in_macro, current_inherited_join.clone())?;
-                        node.children.push(child);
+                            let child = parse_query_node(k, child_map, macros, current_in_macro, current_inherited_join.clone())?;
+                            node.children.push(child);
                     } else if let Value::Array(arr) = v {
                         let mut wrapper = QueryNode {
                             name: k.clone(),

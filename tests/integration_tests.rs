@@ -260,3 +260,109 @@ fn test_user_complex_mapping() {
     
     uaq_free_string(result_ptr);
 }
+
+#[test]
+fn test_parents_cte_generation() {
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 5]",
+            "@fields": { "id": "id", "full_name": "full_name" },
+            "department": {
+                "@source": "departmentBasic",
+                "@fields": {
+                    "id": "id",
+                    "dep_path": "parents(parent_id, id, [name])",
+                    "dep_str": "parents(parent_id, id, name)"
+                }
+            },
+            "education_data": {
+                "@source": "education",
+                "@fields": {
+                    "edu_count": "count(*)",
+                    "max_end_year": "max(end_year)",
+                    "active_edu": "count([status: 1])"
+                }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!({"full_name": "CONCAT(last_name, ' ', first_name)", "id": "id", "status": "status"}));
+    wl.insert("shtat_department_basic:departmentBasic".to_string(), json!(["id", "parent_id", "name"]));
+    wl.insert("employee_education:education".to_string(), json!(["id", "status", "end_year", "employee_id"]));
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert("emp<->departmentBasic".to_string(), "INNER JOIN @table ON @1.department_basic_id = @2.id".to_string());
+    rels.insert("emp->education".to_string(), "LEFT JOIN @table ON @1.id = @2.employee_id".to_string());
+
+    let root = parser::parse_json(json_input, None).expect("parse");
+    let sql_gen = generator::SqlGenerator::new(Some(wl), Some(rels));
+    let result = sql_gen.generate(root).expect("generate");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("parents() SQL:\n{}", sql);
+
+    // LATERAL JOIN used (not scalar subquery) — guarantees per-row evaluation of the CTE
+    assert!(sql.contains("LEFT JOIN LATERAL"), "Must use LATERAL JOIN for parents()");
+    // CTE starts from the CURRENT node (base.id = outer_alias.id)
+    assert!(sql.contains("departmentBasic_base.id = departmentBasic.id"), "Base case must start from current node");
+    // Canonical form: CTE ref first in recursive FROM, then JOIN physical table
+    assert!(sql.contains("FROM departmentBasic_tree"), "Canonical recursive form: CTE ref first");
+    assert!(sql.contains("JOIN shtat_department_basic AS departmentBasic_r ON departmentBasic_r.id = departmentBasic_tree.parent_id"), "Recursive must climb to parent");
+    // Explicit NULL termination at root
+    assert!(sql.contains("departmentBasic_tree.parent_id IS NOT NULL"), "Must terminate at root via IS NOT NULL");
+    // Depth limit
+    assert!(sql.contains("_depth < 50"), "Depth limit must be present");
+    // Root-first ordering
+    assert!(sql.contains("ORDER BY _depth DESC"), "Must order root-first");
+    // Each parents() call gets its own unique LATERAL alias → no naming conflicts
+    assert!(sql.contains("_plat2.result"), "dep_path should reference lateral alias");
+    assert!(sql.contains("_plat3.result"), "dep_str should reference a different lateral alias");
+    // education_data: no JOIN in main query (all-aggregate fields → skip_join)
+    assert!(!sql.contains("LEFT JOIN employee_education"), "education JOIN must be skipped");
+    assert!(sql.contains("SELECT COUNT(*)"), "COUNT subquery must be generated");
+    assert!(sql.contains("SELECT MAX("), "MAX subquery must be generated");
+}
+
+#[test]
+fn test_parents_custom_key_syntax() {
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 3]",
+            "@fields": { "id": "id" },
+            "department": {
+                "@source": "departmentBasic",
+                "@fields": {
+                    "id": "id",
+                    "dep_path_obj": "parents(parent_id, id, {nn:name})",
+                    "dep_path_multi": "parents(parent_id, id, {title:name, key:id})",
+                    "dep_path_arr": "parents(parent_id, id, [name])",
+                    "dep_str": "parents(parent_id, id, name)"
+                }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!({"id":"id","status":"status"}));
+    wl.insert("shtat_department_basic:departmentBasic".to_string(), json!(["id","parent_id","name"]));
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert("emp<->departmentBasic".to_string(), "INNER JOIN @table ON @1.department_basic_id = @2.id".to_string());
+
+    let root = parser::parse_json(json_input, None).expect("parse");
+    let sql_gen = generator::SqlGenerator::new(Some(wl), Some(rels));
+    let result = sql_gen.generate(root).expect("generate");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("Custom key SQL:\n{}", sql);
+
+    // {nn:name} → json_build_object('nn', name)
+    assert!(sql.contains("json_build_object('nn', name)"), "Custom key 'nn' for column 'name'");
+    // {title:name, key:id} → json_build_object('title', name, 'key', id)
+    assert!(sql.contains("json_build_object('title', name, 'key', id)"), "Multi custom key mapping");
+    // [name] → json_build_object('name', name)
+    assert!(sql.contains("json_build_object('name', name)"), "[name] syntax still works");
+    // string_agg for bare column
+    assert!(sql.contains("string_agg(name::text"), "Bare column → string_agg");
+}
