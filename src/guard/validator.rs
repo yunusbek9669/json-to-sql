@@ -73,9 +73,17 @@ impl Guard {
                         if builtins.contains(&ident.to_uppercase().as_str()) { continue; }
                         if ident.parse::<f64>().is_ok() { continue; }
                         
-                        // If it's a locally aliased macro field, allow it
+                        // FIX #10: when an identifier matches a local (flattened) alias,
+                        // the identifier will be *substituted* with the alias SQL value by
+                        // auto_prefix_field — the whitelist check for the current table is
+                        // intentionally skipped.  We add a defense-in-depth re-validation of
+                        // the alias VALUE itself so that a dangerous expression can never
+                        // reach the final SQL even if child-processing somehow missed it.
                         if let Some(aliases) = local_aliases {
-                            if aliases.contains_key(ident) { continue; }
+                            if let Some(alias_sql) = aliases.get(ident) {
+                                Guard::check_global_threats(alias_sql)?;
+                                continue;
+                            }
                         }
                         
                         // Strip potential prefix to match whitelist directly
@@ -90,10 +98,15 @@ impl Guard {
             }
         }
 
+        // FIX #1: detect SELECT in any whitespace form — "SELECT(", "(SELECT", "SELECT\t", etc.
+        // Strip all whitespace then check for the bare word to catch "SELECT(1)" style injections.
+        let compact_upper = field_upper.split_whitespace().collect::<Vec<_>>().join(" ");
+        let no_space_upper = field_upper.replace(char::is_whitespace, "");
+
         // 1. Allow CASE expressions directly
         if field_upper.starts_with("CASE ") && field_upper.ends_with(" END") {
-            if field_upper.contains("SELECT ") {
-                return Err("Unsafe CASE expression with SELECT".to_string());
+            if no_space_upper.contains("SELECT") {
+                return Err("Unsafe CASE expression: SELECT is not allowed".to_string());
             }
             return Ok(());
         }
@@ -104,8 +117,8 @@ impl Guard {
             if !builtins.contains(&func_name.as_str()) {
                 return Err(format!("Unsafe or unsupported function call: {}", func_name));
             }
-            // Subqueries are never allowed in frontend @fields
-            if field_upper.contains("SELECT ") || field_upper.contains("SELECT(") {
+            // FIX #1: check SELECT in compact form too ("SELECT(", "(SELECT", etc.)
+            if compact_upper.contains("SELECT ") || no_space_upper.contains("SELECT(") || no_space_upper.contains("(SELECT") {
                 return Err("Subqueries are not allowed in field expressions".to_string());
             }
         } else {

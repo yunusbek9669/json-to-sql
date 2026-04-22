@@ -65,7 +65,13 @@ impl SqlGenerator {
         if let Ok(n) = val.parse::<f64>() {
             self.next_param(json!(n))
         } else {
-            let clean_val = val.trim_matches('\'').to_string();
+            // FIX #7: trim_matches('\'') strips ALL leading/trailing quotes, not just one pair.
+            // Use explicit pair removal so "'test'" → "test" but "'''evil'''" → "''evil''" stays.
+            let clean_val = if val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2 {
+                val[1..val.len() - 1].to_string()
+            } else {
+                val.to_string()
+            };
             self.next_param(Value::String(clean_val))
         }
     }

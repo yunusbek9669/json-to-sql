@@ -366,3 +366,86 @@ fn test_parents_custom_key_syntax() {
     // string_agg for bare column
     assert!(sql.contains("string_agg(name::text"), "Bare column → string_agg");
 }
+
+#[test]
+fn test_security_fixes() {
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!(["id", "status", "name", "role"]));
+    let mut rels = std::collections::HashMap::new();
+
+    // ── FIX #1: CASE SELECT without space ──────────────────────────────────
+    let json1 = r#"{"@data[]":{"@source":"emp","@fields":{"x":"CASE WHEN(SELECT(1))=1 THEN id ELSE id END"}}}"#;
+    let root1 = parser::parse_json(json1, None).unwrap();
+    let r1 = generator::SqlGenerator::new(Some(wl.clone()), Some(rels.clone())).generate(root1);
+    assert!(r1.is_err(), "CASE SELECT( should be blocked: {:?}", r1);
+
+    // ── FIX #2: IN operator comma split ────────────────────────────────────
+    let src2 = parser::parse_source("emp[role: in (1, 2, 3), status: 1]");
+    assert_eq!(src2.filters.len(), 2, "IN filter must be parsed as one unit, not split");
+    assert_eq!(src2.filters[0].operator, "in");
+    assert_eq!(src2.filters[0].value.trim(), "(1, 2, 3)");
+
+    // ── FIX #3: $order must be validated at parse time ─────────────────────
+    let src3a = parser::parse_source("emp[$order: id DESC]");
+    assert!(src3a.order.is_some(), "$order valid");
+    let src3b = parser::parse_source("emp[$order: id; DROP TABLE users]");
+    assert!(src3b.order.is_none(), "malicious $order must be discarded");
+
+    // ── FIX #4: $join must only accept known values ────────────────────────
+    let src4a = parser::parse_source("emp[$join: left]");
+    assert_eq!(src4a.join_type.as_deref(), Some("left"));
+    let src4b = parser::parse_source("emp[$join: LEFT UNION SELECT 1]");
+    assert!(src4b.join_type.is_none(), "malicious $join must be discarded");
+
+    // ── FIX #5: SELECT in any field blocked by threats ─────────────────────
+    let json5 = r#"{"@data":{"@source":"emp","@fields":{"x":"SELECT id FROM emp"}}}"#;
+    let root5 = parser::parse_json(json5, None).unwrap();
+    let r5 = generator::SqlGenerator::new(Some(wl.clone()), Some(rels.clone())).generate(root5);
+    assert!(r5.is_err(), "SELECT in @fields must be blocked");
+
+    // ── FIX #9: $limit capped at MAX_QUERY_LIMIT (10_000) ─────────────────
+    let src9 = parser::parse_source("emp[$limit: 18446744073709551615]");
+    assert!(src9.limit.unwrap() <= 10_000, "$limit must be capped");
+
+    println!("All security fix tests passed ✓");
+}
+
+#[test]
+fn test_security_fix_10_local_alias() {
+    // Setup: flatten child puts "title" → "pos.name_latin" into local_aliases.
+    // The parent expression CONCAT(title, ' ', id) must:
+    //   - allow "title" (local alias, its value "pos.name_latin" is safe)
+    //   - still validate "id" against the whitelist
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 2]",
+            "@fields": {
+                "id": "id",
+                "label": "CONCAT(title, ' ', id)"
+            },
+            "pos_info": {
+                "@source": "pos",
+                "@flatten": true,
+                "@fields": { "title": "name_latin" }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!(["id", "status"]));
+    wl.insert("position:pos".to_string(), json!(["name_latin"]));
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert("emp<->pos".to_string(), "LEFT JOIN @table ON @1.pos_id = @2.id".to_string());
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let sql_gen = generator::SqlGenerator::new(Some(wl), Some(rels));
+    let result = sql_gen.generate(root).expect("should succeed — title is a valid local alias");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("Fix #10 SQL:\n{}", sql);
+
+    // "title" must be substituted with "pos.name_latin" (alias value), not left as-is
+    assert!(sql.contains("pos.name_latin"), "alias must be substituted");
+    assert!(!sql.contains("emp.title"), "raw alias key must not appear as emp column");
+}

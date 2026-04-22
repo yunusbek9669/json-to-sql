@@ -113,8 +113,14 @@ impl Guard {
                     let mut mapped = false;
                     if let Some(aliases) = local_aliases {
                         if let Some(target) = aliases.get(&current_word) {
-                            result.push_str(target);
-                            mapped = true;
+                            // FIX #10 (defense-in-depth): verify the alias value has no
+                            // dangerous SQL before writing it directly into the output.
+                            if Guard::check_global_threats(target).is_ok() {
+                                result.push_str(target);
+                                mapped = true;
+                            }
+                            // If the value fails the threat check, fall through to normal
+                            // prefixing — the identifier will be treated as a plain column.
                         }
                     }
                     
@@ -141,8 +147,10 @@ impl Guard {
             let mut mapped = false;
             if let Some(aliases) = local_aliases {
                 if let Some(target) = aliases.get(&current_word) {
-                    result.push_str(target);
-                    mapped = true;
+                    if Guard::check_global_threats(target).is_ok() {
+                        result.push_str(target);
+                        mapped = true;
+                    }
                 }
             }
             

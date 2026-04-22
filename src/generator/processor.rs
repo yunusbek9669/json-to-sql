@@ -472,6 +472,10 @@ impl SqlGenerator {
         let child_col   = parts[1].trim().to_string();
         let fields_str  = parts[2].trim().to_string();
 
+        // FIX #8: JSON output key in {key:col} must be a safe identifier.
+        static KEY_RE: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
+
         let (fields, is_json) = if fields_str.starts_with('{') && fields_str.ends_with('}') {
             // {nn:name, kk:code} → custom key mapping, always JSON array
             let inner = &fields_str[1..fields_str.len() - 1];
@@ -480,7 +484,9 @@ impl SqlGenerator {
                     let mut kv = p.splitn(2, ':');
                     let key = kv.next()?.trim().to_string();
                     let col = kv.next()?.trim().to_string();
-                    if key.is_empty() || col.is_empty() { None } else { Some((key, col)) }
+                    // Key must be a valid identifier; silently drop invalid pairs.
+                    if key.is_empty() || col.is_empty() || !KEY_RE.is_match(&key) { return None; }
+                    Some((key, col))
                 })
                 .collect();
             if pairs.is_empty() { return None; }

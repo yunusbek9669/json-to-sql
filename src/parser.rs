@@ -3,6 +3,34 @@ use serde_json::Value;
 use regex::Regex;
 
 use crate::models::{FilterRule, QueryNode, SourceDef};
+use crate::guard::Guard;
+
+/// Hard cap on LIMIT/OFFSET to prevent accidental or intentional DoS.
+const MAX_QUERY_LIMIT: u64 = 10_000;
+
+/// Splits `@source` rule arguments by top-level commas only,
+/// ignoring commas that are inside `(...)` or `[...]`.
+/// Without this, `role: in (1, 2, 3)` would be split into three broken parts.
+fn split_source_args(s: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => { depth += 1; current.push(c); }
+            ')' | ']' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                let t = current.trim().to_string();
+                if !t.is_empty() { parts.push(t); }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    let t = current.trim().to_string();
+    if !t.is_empty() { parts.push(t); }
+    parts
+}
 
 static SOURCE_RE: once_cell::sync::Lazy<Regex> = once_cell::sync::Lazy::new(|| {
     Regex::new(r"^([a-zA-Z0-9_]+)(?:\[(.*)\])?$").unwrap()
@@ -22,30 +50,54 @@ pub fn parse_source(source_str: &str) -> SourceDef {
     if let Some(rules_match) = caps.get(2) {
         let rules_str = rules_match.as_str().trim();
         if !rules_str.is_empty() {
-            let parts: Vec<&str> = rules_str.split(',').collect();
-            for part in parts {
-                let part = part.trim();
-                if part.is_empty() { continue; }
-                
+            // FIX #2: bracket-aware split so "in (1, 2, 3)" is not broken up.
+            for part in split_source_args(rules_str) {
                 if let Some((field, rest)) = part.split_once(':') {
                     let field = field.trim();
-                    let rest = rest.trim();
-                    
+                    let rest  = rest.trim();
+
                     match field {
                         "$limit" => {
-                            limit = rest.parse::<u64>().ok();
+                            // FIX #9: cap LIMIT to prevent DoS via huge result sets.
+                            if let Ok(n) = rest.parse::<u64>() {
+                                limit = Some(n.min(MAX_QUERY_LIMIT));
+                            }
                         }
                         "$offset" => {
-                            offset = rest.parse::<u64>().ok();
+                            if let Ok(n) = rest.parse::<u64>() {
+                                offset = Some(n.min(MAX_QUERY_LIMIT));
+                            }
                         }
                         "$order" => {
-                            order = Some(rest.to_string());
+                            // FIX #3: validate $order at parse time — only "col [ASC|DESC]".
+                            static ORDER_RE: once_cell::sync::Lazy<Regex> =
+                                once_cell::sync::Lazy::new(|| {
+                                    Regex::new(r"(?i)^[a-zA-Z0-9_\.]+(\s+(ASC|DESC))?$").unwrap()
+                                });
+                            if Guard::check_global_threats(rest).is_ok() && ORDER_RE.is_match(rest) {
+                                order = Some(rest.to_string());
+                            }
+                            // silently discard malformed $order
                         }
                         "$join" => {
-                            join_type = Some(rest.to_lowercase());
+                            // FIX #4: only accept known join-type values.
+                            let lower = rest.to_lowercase();
+                            let valid = matches!(lower.trim(),
+                                "left" | "->" | "right" | "<-" |
+                                "inner" | "-><-" | "full" | "<->" | "cross"
+                            );
+                            if valid { join_type = Some(lower.trim().to_string()); }
+                            // silently discard unknown $join values
                         }
                         "$rel" => {
-                            rel = Some(rest.to_string());
+                            // Validate $rel: only alphanumeric + underscore (table/alias names).
+                            static REL_RE: once_cell::sync::Lazy<Regex> =
+                                once_cell::sync::Lazy::new(|| {
+                                    Regex::new(r"^[a-zA-Z0-9_]+$").unwrap()
+                                });
+                            if REL_RE.is_match(rest) {
+                                rel = Some(rest.to_string());
+                            }
                         }
                         _ => {
                             let (operator, value) = parse_operator_and_value(rest);
