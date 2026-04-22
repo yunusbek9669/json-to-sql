@@ -1384,7 +1384,7 @@ alias[
   "chiqish_nomi": "max(col)",
   "chiqish_nomi": "min(col)",
   "chiqish_nomi": "sum([field: value].col)",
-  "chiqish_nomi": "avg([field: value].col)",
+  "chiqish_nomi": "avg([field: value].col)"
 }
 ```
 
