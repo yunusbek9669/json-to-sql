@@ -1,361 +1,332 @@
-# UAQ Engine — To'liq Dokumentatsiya
+# UAQ Engine — To'liq Qo'llanma
 
-> **Universal Adaptive Query Engine** — Rust tilida yozilgan, JSON so'rovlardan xavfsiz PostgreSQL so'rovlarini generatsiya qiluvchi yuqori unumdorli kutubxona.
+> **Universal Adaptive Query Engine** — Rust tilida yozilgan, JSON so'rovlardan xavfsiz PostgreSQL so'rovlarini avtomatik generatsiya qiluvchi yuqori unumdorli kutubxona.
 
 ---
 
 ## Mundarija
 
 - [Tizimga Umumiy Nazar](#tizimga-umumiy-nazar)
-- [Backend Uchun Qo'llanma](#backend-uchun-qollanma)
-  - [Integratsiya (FFI)](#1-integratsiya-ffi)
-  - [Whitelist — Xavfsizlik Qatlami](#2-whitelist--xavfsizlik-qatlami)
-  - [Relations — Avtomatik JOIN](#3-relations--avtomatik-join)
-  - [Macros — Qayta Ishlatiluvchi Shablonlar](#4-macros--qayta-ishlatiluvchi-shablonlar)
-  - [Tizim Introspeksiyasi (@info)](#5-tizim-introspeksiyasi-info)
-- [Frontend Uchun Qo'llanma](#frontend-uchun-qollanma)
-  - [So'rov Strukturasi](#1-sorov-strukturasi)
-  - [Direktivalar](#2-direktivalar)
-  - [Filtr Operatorlari](#3-filtr-operatorlari)
-  - [Konfiguratsiya Parametrlari](#4-konfiguratsiya-parametrlari)
-  - [Virtual Maydonlar Bilan Ishlash](#5-virtual-maydonlar-bilan-ishlash)
-  - [So'rov Namunalari](#6-sorov-namunalari)
-- [Chiqish Formati (Output)](#chiqish-formati-output)
-- [Xavfsizlik](#xavfsizlik)
-- [Qo'shimcha Imkoniyatlar](#qoshimcha-imkoniyatlar)
-- [Ko'p Tilli Integratsiya](#kop-tilli-integratsiya)
+- [Backend Qo'llanmasi](#backend-qollanmasi)
+  - [1. Integratsiya (FFI)](#1-integratsiya-ffi)
+  - [2. Whitelist — Xavfsizlik Qatlami](#2-whitelist--xavfsizlik-qatlami)
+  - [3. Relations — Avtomatik JOIN](#3-relations--avtomatik-join)
+  - [4. Macros — Qayta Ishlatiluvchi Shablonlar](#4-macros--qayta-ishlatiluvchi-shablonlar)
+  - [5. Tizim Introspeksiyasi (@info)](#5-tizim-introspeksiyasi-info)
+  - [6. Xavfsizlik Modeli](#6-xavfsizlik-modeli)
+- [Frontend Qo'llanmasi](#frontend-qollanmasi)
+  - [1. So'rov Strukturasi](#1-sorov-strukturasi)
+  - [2. @source — Manba va Filtrlar](#2-source--manba-va-filtrlar)
+  - [3. @fields — Maydonlar](#3-fields--maydonlar)
+  - [4. Ichma-ich So'rovlar](#4-ichma-ich-sorovlar)
+  - [5. Maxsus Maydon Funksiyalari](#5-maxsus-maydon-funksiyalari)
+  - [6. Amaliy Misollar](#6-amaliy-misollar)
+- [Chiqish Formati](#chiqish-formati)
+- [Cheklovlar va Xatolar](#cheklovlar-va-xatolar)
+- [Fayl Ma'lumotlarini Base64 ga Aylantirish](#fayl-malumotlarini-base64-ga-aylantirish)
+- [Barcha Integratsiya Tillari](#barcha-integratsiya-tillari)
+- [Build va O'rnatish](#build-va-ornatish)
+- [Best Practices](#best-practices)
 
 ---
 
 ## Tizimga Umumiy Nazar
 
 ```
-Frontend (JSON) → UAQ Engine (Rust) → SQL + Params → PostgreSQL → JSON natija
+Frontend JSON  →  uaq_parse()  →  SQL + params  →  PostgreSQL  →  JSON natija
 ```
 
-**Qanday ishlaydi:**
-
-1. **Frontend** — deklarativ JSON so'rov yuboradi (qaysi jadval, qaysi maydonlar, qanday filtr)
-2. **Backend Middleware** — `uaq_parse()` funksiyasiga JSON + Whitelist + Relations + Macros beradi
-3. **UAQ Engine** — xavfsiz, parametrlangan SQL va params qaytaradi
-4. **Backend** — tayyor SQL ni PDO/prepared statement orqali bazaga yuboradi, natijani frontendga jo'natadi
-
-**Asosiy afzalliklar:**
-
-| Xususiyat          | Tavsif                                                                  |
-|--------------------|-------------------------------------------------------------------------|
-| 🔒 Xavfsizlik      | SQL injection imkonsiz, barcha qiymatlar parametrlashtirilgan           |
-| ⚡ Tezlik           | Native Rust — ORM/Query Builder lardan 10–100x tez                      |
-| 🔗 Auto-Join       | BFS orqali murakkab jadval yo'llarini avtomatik topish                  |
-| 📐 Moslashuvchan   | Har qanday til bilan (PHP, Java, Node.js, Python) FFI integratsiya      |
-| 🗂 Yagona Endpoint | Frontend uchun bitta API orqali istalgan strukturadagi ma'lumotni olish |
+1. **Frontend** deklarativ JSON yuboradi
+2. **Backend middleware** `uaq_parse(json, whitelist, relations, macros)` chaqiradi
+3. **UAQ Engine** xavfsiz, parametrlangan SQL qaytaradi
+4. **Backend** tayyor SQL ni prepared statement orqali bazaga yuboradi
 
 ---
 
-## Backend Uchun Qo'llanma
-
-Backend dasturchining vazifasi:
-1. Xavfsizlik qoidalarini (`whitelist`) belgilash
-2. Jadvallar orasidagi aloqalarni (`relations`) yozish
-3. Ixtiyoriy: qayta ishlatiluvchi shablonlar (`macros`) tayyorlash
-4. Frontend so'rovini `uaq_parse()` ga berish va natijani bazaga yuborish
+## Backend Qo'llanmasi
 
 ### 1. Integratsiya (FFI)
 
-**C-Header:**
+#### C API
+
 ```c
+// SQL va params generatsiya
 char* uaq_parse(
-    const char* json_input,      // Frontenddan kelgan JSON so'rov
-    const char* whitelist_json,  // Xavfsizlik: qaysi jadval va ustunlarga ruxsat
+    const char* json_input,      // Frontenddan kelgan JSON
+    const char* whitelist_json,  // Xavfsizlik konfiguratsiyasi
     const char* relations_json,  // Jadvallararo JOIN yo'llari
-    const char* macros_json      // Ixtiyoriy: qayta ishlatiluvchi shablonlar (null bo'lishi mumkin)
+    const char* macros_json      // Ixtiyoriy (null bo'lishi mumkin)
 );
 
+// Bazadan kelgan JSON ichidagi fayl yo'llarini base64 ga o'girish
 char* uaq_inject_base64_files(
-    const char* json_result,     // Bazadan kelgan JSON natija
-    const char* root_files_path, // Fayllar joylashgan asosiy papka
-    const char* trigger_prefix   // Qaysi qiymatlarni base64 ga aylantirish
+    const char* json_result,
+    const char* root_files_path,
+    const char* trigger_prefix
 );
 
-void uaq_free_string(char* s);   // Xotirani tozalash (MAJBURIY!)
+// Xotirani tozalash — MAJBURIY!
+void uaq_free_string(char* s);
 ```
 
-> ⚠️ **Muhim:** `uaq_parse()` va `uaq_inject_base64_files()` dan qaytgan har bir string uchun `uaq_free_string()` chaqirish **majburiy** — aks holda memory leak yuzaga keladi.
+> ⚠️ `uaq_parse()` va `uaq_inject_base64_files()` dan qaytgan har bir `char*` uchun `uaq_free_string()` chaqirish **majburiy**.
 
-**PHP (FFI) integratsiyasi:**
+#### PHP
+
 ```php
 $ffi = \FFI::cdef("
-    char* uaq_parse(const char* json_input, const char* whitelist, const char* relations, const char* macros_input);
-    char* uaq_inject_base64_files(const char* json_result, const char* root_files_path, const char* trigger_prefix);
-    void uaq_free_string(char* s);
+    char* uaq_parse(const char* json, const char* wl, const char* rels, const char* macros);
+    char* uaq_inject_base64_files(const char* json, const char* path, const char* prefix);
+    void  uaq_free_string(char* s);
 ", __DIR__ . '/libjson_to_sql.so');
 
-// 1. SQL va params olish
 $raw    = $ffi->uaq_parse($jsonInput, $whitelist, $relations, null);
 $result = json_decode(\FFI::string($raw), true);
 $ffi->uaq_free_string($raw);
 
 if (!$result['isOk']) {
-    throw new Exception($result['message']);
+    throw new \RuntimeException($result['message']);
 }
 
-// 2. PDO bilan bajarish (xavfsiz)
 $stmt = $pdo->prepare($result['sql']);
 $stmt->execute($result['params']);
-$data = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// 3. Natijadagi fayl yo'llarini base64 ga aylantirish (ixtiyoriy)
-$jsonStr = json_encode($data[0]['result']);
-$raw2    = $ffi->uaq_inject_base64_files($jsonStr, '/var/www/project', '/uploads/');
-$final   = json_decode(\FFI::string($raw2), true);
-$ffi->uaq_free_string($raw2);
+$data = $stmt->fetchColumn();          // JSON string
 ```
 
-**Python (ctypes) integratsiyasi:**
+#### Python
+
 ```python
 import ctypes, json
 
 lib = ctypes.CDLL('./libjson_to_sql.so')
-lib.uaq_parse.restype  = ctypes.c_char_p
-lib.uaq_free_string.argtypes = [ctypes.c_char_p]
+lib.uaq_parse.restype          = ctypes.c_char_p
+lib.uaq_free_string.argtypes   = [ctypes.c_char_p]
 
-raw    = lib.uaq_parse(json_input.encode(), whitelist.encode(), relations.encode(), None)
+raw    = lib.uaq_parse(json_in.encode(), wl.encode(), rels.encode(), None)
 result = json.loads(raw.decode())
 lib.uaq_free_string(raw)
+```
+
+#### Node.js (ffi-napi)
+
+```js
+const ffi  = require('ffi-napi');
+const ref  = require('ref-napi');
+
+const lib = ffi.Library('./libjson_to_sql.so', {
+  uaq_parse:         ['string', ['string','string','string','string']],
+  uaq_free_string:   ['void',   ['string']],
+});
+
+const raw    = lib.uaq_parse(jsonInput, whitelist, relations, null);
+const result = JSON.parse(raw);
+lib.uaq_free_string(raw);
 ```
 
 ---
 
 ### 2. Whitelist — Xavfsizlik Qatlami
 
-Whitelist — frontendga qaysi jadval va ustunlarni ko'rsatish mumkinligini belgilovchi asosiy xavfsizlik qatlami. Format: `"haqiqiy_jadval:alias"`.
+Whitelist frontendga **qaysi jadval va ustunlar ko'rinishi**ni belgilaydi. Format: `"haqiqiy_jadval:alias"`.
 
-#### 2.1. Oddiy ruxsat ro'yxati (Array formatida)
+#### 2.1. Oddiy ruxsat ro'yxati
 
 ```json
 {
-  "employee:emp":          ["id", "first_name", "last_name", "status", "birthday", "jshshir"],
-  "education:edu":         ["*"],
-  "employee_education:ee": ["id", "status", "diploma_given_date", "end_year", "diploma_type_name"]
+  "employee:emp":                        ["id", "first_name", "last_name", "status", "birthday"],
+  "employee_education:edu":              ["id", "status", "end_year", "diploma_type_name"],
+  "shtat_department_basic:departmentBasic": ["*"]
 }
 ```
 
-- `["*"]` — barcha ustunlarga ochiq ruxsat (frontend haqiqiy ustun nomlarini ishlatadi)
-- Ro'yxatdagi ustunlar — faqat shu ustunlarga murojaat mumkin
-- Alias (`emp`) — frontend faqat shu taxallus orqali jadvalga murojaat qiladi, haqiqiy jadval nomi (`employee`) yashiriladi
+- `["*"]` — barcha ustunlarga ruxsat (frontend haqiqiy ustun nomlarini ishlatadi)
+- Alias (`emp`) — frontend faqat shu nom orqali murojaat qiladi; haqiqiy nom (`employee`) yashiriladi
+- Whitelist'da yo'q jadval yoki ustundan `isOk: false` xatolik qaytaradi
 
-#### 2.2. Mapping va Virtual Maydonlar (Object formatida)
+#### 2.2. Mapping — Virtual va Qayta Nomlangan Maydonlar
 
-Frontend haqiqiy DB ustun nomlarini ko'rishi kerak bo'lmagan hollarda:
+Haqiqiy DB ustun nomlarini yashirish yoki SQL ifodalarini virtual maydon sifatida taqdim etish:
 
 ```json
 {
   "employee:emp": {
     "id":        "id",
     "full_name": "CONCAT(last_name, ' ', first_name)",
-    "jshshir":   "jshshir",
     "birthDay":  "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')",
+    "age":       "EXTRACT(YEAR FROM AGE(TO_TIMESTAMP(birthday)))",
     "status":    "status"
   },
+  "shtat_department_basic:departmentBasic": {
+    "id":           "id",
+    "name":         "name_uz",
+    "status":       "status",
+    "has_children": "EXISTS(SELECT 1 FROM shtat_department_basic WHERE parent_id = departmentBasic.id)",
+    "is_active":    "CASE WHEN status = 1 THEN true ELSE false END"
+  },
   "structure_organization:org": {
-    "unique":  "id",
-    "title":   "name_uz",
-    "active":  "status"
+    "unique": "id",
+    "title":  "name_uz",
+    "active": "status"
   }
 }
 ```
 
 **Qanday ishlaydi:**
 
-| Frontend yozadi  | SQL da aylanadi                                          |
-|------------------|----------------------------------------------------------|
-| `org[active: 1]` | `WHERE structure_organization.status = :p1`              |
-| `emp.full_name`  | `CONCAT(employee.last_name, ' ', employee.first_name)`   |
-| `emp.birthDay`   | `TO_CHAR(TO_TIMESTAMP(employee.birthday), 'DD.MM.YYYY')` |
+| Frontend yozadi                       | SQL da aylanadi                                          |
+|---------------------------------------|----------------------------------------------------------|
+| `emp.full_name`                       | `CONCAT(employee.last_name, ' ', employee.first_name)`   |
+| `emp.birthDay`                        | `TO_CHAR(TO_TIMESTAMP(employee.birthday), 'DD.MM.YYYY')` |
+| `org[active: 1]`                      | `WHERE structure_organization.status = :p1`              |
+| `departmentBasic[has_children: true]` | `WHERE EXISTS(...) = :p1`                                |
 
-#### 2.3. Virtual (Expression) Maydonlar
+> **Muhim:** Virtual maydonlar `@source` filtri sifatida ham ishlatiladi — frontend oddiy ustundek yozadi.
 
-Haqiqiy jadvaldagi ustun emas, balki SQL ifodasi bo'lgan maydonlar. Masalan, `has_children`:
-
-```json
-{
-  "shtat_department_basic:departmentBasic": {
-    "id":           "id",
-    "name":         "name_uz",
-    "status":       "status",
-    "has_children": "EXISTS(SELECT 1 FROM public.shtat_department_basic WHERE public.shtat_department_basic.parent_id = departmentBasic.department_basic)"
-  }
-}
-```
-
-> ✅ **Muhim:** Virtual maydonlar `@fields` da ishlatilgani kabi, `@source` filtrlari ichida ham bemalol ishlatilishi mumkin!
->
-> ```json
-> "@source": "departmentBasic[status: 1, has_children: true]"
-> ```
->
-> Engine avtomatik ravishda `has_children` ning SQL ifodasi ekanligini tushunadi va WHERE shartiga to'g'ri joylashtiradi. Frontend hech qanday farq sezmaydi.
-
-**Expression avtomatik tip aniqlash** (`@info @tables` so'rovida):
+#### 2.3. Expression Tip Aniqlash (@info da ko'rinadi)
 
 | SQL Ifoda boshlanishi         | Qaytariladigan tip  |
 |-------------------------------|---------------------|
-| `EXISTS(...)`                 | `boolean`           |
-| `NOT EXISTS(...)`             | `boolean`           |
-| `TO_CHAR(...)`, `CONCAT(...)` | `character varying` |
+| `EXISTS(...)`, `NOT EXISTS`   | `boolean`           |
+| `CASE WHEN ... THEN true`     | `boolean`           |
+| `CONCAT(...)`, `TO_CHAR(...)` | `character varying` |
 | `EXTRACT(...)`, `LENGTH(...)` | `numeric`           |
 | `TO_TIMESTAMP(...)`, `NOW()`  | `timestamp`         |
-| `ARRAY_AGG(...)`              | `array`             |
-| `JSONB_BUILD_OBJECT(...)`     | `json`              |
 | `COUNT(...)`, `SUM(...)`      | `numeric`           |
-| `CASE WHEN ... THEN true`     | `boolean`           |
-| Boshqa murakkab ifodalar      | `expression`        |
+| Boshqalar                     | `expression`        |
 
 ---
 
 ### 3. Relations — Avtomatik JOIN
 
-Jadvallar orasidagi bog'lanishni bir marta yozasiz — Engine zarur bo'lganda avtomatik JOIN quradi.
+Jadvallar orasidagi bog'lanishni **bir marta** yozasiz — Engine kerak bo'lganda avtomatik JOIN quradi.
 
 #### 3.1. Relation Formati
 
 ```
-"alias1->alias2": "JOIN_TURI @table ON @1.ustun = @2.ustun"
+"alias1 OPERATOR alias2[:rel_nomi]": "@join @table ON @1.ustun = @2.ustun [AND ...]"
 ```
 
-**Kalit operatorlari:**
+| Kalit operator | SQL JOIN turi | Izoh                    |
+|----------------|---------------|-------------------------|
+| `->`           | LEFT JOIN     | alias1 dan alias2 ga    |
+| `<-`           | RIGHT JOIN    | alias1 dan alias2 ga    |
+| `-><-`         | INNER JOIN    | ikki tomonlama majburiy |
+| `<->`          | FULL JOIN     | ikki tomonlama to'liq   |
 
-| Kalit  | JOIN turi  |
-|--------|------------|
-| `->`   | LEFT JOIN  |
-| `<-`   | RIGHT JOIN |
-| `-><-` | INNER JOIN |
-| `<->`  | FULL JOIN  |
-
-**Placeholder ma'nolari:**
-
-| Placeholder | Ma'nosi                                                    |
-|-------------|------------------------------------------------------------|
-| `@join`     | Join turi (LEFT, RIGHT, INNER, FULL) nomi                  |
-| `@table`    | Child jadvalning haqiqiy SQL nomi                          |
-| `@1`        | Kalitdagi birinchi alias (parent) ning haqiqiy jadval nomi |
-| `@2`        | Kalitdagi ikkinchi alias (child) ning haqiqiy jadval nomi  |
-
-#### 3.2. Misol
+| Placeholder | Ma'nosi                                        |
+|-------------|------------------------------------------------|
+| `@join`     | Operatorga mos JOIN nomi (LEFT JOIN va h.k.)   |
+| `@table`    | Child jadvalning haqiqiy nomi (AS alias bilan) |
+| `@1`        | Kalitdagi birinchi (parent) alias              |
+| `@2`        | Kalitdagi ikkinchi (child) alias               |
 
 ```json
 {
-  "emp->empRelOrg":     "@join @table ON @2.employee_id = @1.id AND @2.status = 1",
-  "empRelOrg->org":     "@join @table ON @2.id = @1.organization_id",
-  "emp->dept":          "@join @table ON @2.employee_id = @1.id",
-  "dept->deptBasic":    "@join @table ON @2.id = @1.department_basic_id",
-  "deptBasic<->org":    "@join @table ON @1.organization_id = @2.id"
+  "emp->dept":                "@join @table ON @2.employee_id = @1.id",
+  "dept->deptBasic":          "@join @table ON @2.id = @1.department_basic_id",
+  "deptBasic<->org":          "@join @table ON @1.organization_id = @2.id",
+  "deptBasic<->innerOrg":     "@join @table ON @1.command_organization_id = @2.id",
+  "emp->education":           "@join @table ON @2.employee_id = @1.id AND @2.status = 1",
+  "emp->positionBasic:admin": "@join @table ON @2.employee_id = @1.id AND @2.type = 'admin'"
 }
 ```
 
-#### 3.3. Self-Referencing (Bitta Jadval — Ikki Alias)
+#### 3.2. Bir Jadvalga Ikki Xil Aloqa (`:rel_nomi`)
 
-Bitta haqiqiy jadvalga ikki xil maqsadda ulanish kerak bo'lganda:
+Bir xil jadval juftligiga bir necha xil usulda ulanish kerak bo'lsa, relation nomiga `:suffix` qo'shing:
 
-**Whitelist:**
 ```json
+{
+  "emp->positionBasic":       "@join @table ON @2.employee_id = @1.id",
+  "emp->positionBasic:admin": "@join @table ON @2.employee_id = @1.id AND @2.type = 'admin'"
+}
+```
+
+Frontend `$rel: admin` deb aniq relation tanlaydi:
+```json
+{ "@source": "positionBasic[$rel: admin, status: 1]" }
+```
+
+#### 3.3. Bitta Haqiqiy Jadval — Ikki Alias
+
+```json
+// Whitelist
 {
   "structure_organization:org":      { "id": "id", "name": "name_uz" },
   "structure_organization:innerOrg": { "id": "id", "name": "name_uz" }
 }
-```
 
-**Relations:**
-```json
+// Relations
 {
-  "dept->org":      "@join @table ON @1.viloyat_id = @2.id",
-  "dept->innerOrg": "@join @table ON @1.tuman_id = @2.id"
+  "deptBasic->org":      "@join @table ON @1.viloyat_id = @2.id",
+  "deptBasic->innerOrg": "@join @table ON @1.tuman_id = @2.id"
 }
 ```
 
-Frontend `org` va `innerOrg` ni alohida jadval kabi ishlatadi, ikkalasi ham `structure_organization` ga resolve bo'ladi.
+#### 3.4. Auto-Path — BFS Orqali Yo'l Topish
 
-#### 3.4. Auto-Path (BFS — Avtomatik Yo'l Topish)
-
-`emp → org` to'g'ridan-to'g'ri relation bo'lmasa ham, Engine relations grafidan eng qisqa yo'lni topadi:
+To'g'ridan-to'g'ri `emp → org` relation bo'lmasa ham Engine grafdan eng qisqa yo'lni topadi:
 
 ```
-emp → dept → deptBasic → org
+emp → dept → deptBasic → org   (3 oraliq jadval avtomatik JOIN qilinadi)
 ```
 
-Engine barcha oraliq jadvallarni avtomatik JOIN qiladi. Frontend faqat:
-```json
-{ "@source": "org[status: 1]", "@fields": { "name": "title" } }
-```
-deb yozadi — xolos.
+Frontend faqat `"@source": "org"` deb yozadi — oraliq jadvallar haqida bilishi shart emas.
 
 ---
 
 ### 4. Macros — Qayta Ishlatiluvchi Shablonlar
 
-Tez-tez chaqiriladigan murakkab so'rovlarni oldindan yozib, istalgan joyda ishlatish mumkin.
+Tez-tez takrorlanadigan murakkab so'rovlarni oldindan tayyorlab, frontend tomonidan parameter bilan chaqirish mumkin.
 
-#### 4.1. Macro Ta'rifi (Backend)
+#### Ta'rif (Backend)
 
 ```json
 {
   "activeEmployee": {
     "@source": "emp[status: 1]",
     "@fields": {
-      "id":       "id",
-      "jshshir":  "jshshir",
+      "id":        "id",
       "full_name": "full_name",
-      "birthDay":  "birthDay"
+      "birthDay":  "birthDay",
+      "jshshir":   "jshshir"
     }
   },
 
-  "positionCteTable": {
-    "@source": "departmentStaffPosition[status: 1]",
+  "currentPosition": {
+    "@source": "departmentStaffPosition[status: 1, is_current: true]",
     "@fields": {
       "id":         "id",
-      "is_current": "is_current",
-      "start_time": "start_time"
+      "begin_date": "start_time"
     },
     "ishJoyi": {
       "@source": "departmentBasic[status: 1]",
       "@flatten": true,
-      "@fields": ["*"]
+      "@fields":  ["*"]
     }
   }
 }
 ```
 
-#### 4.2. Frontend Macro Ishlatish
+#### Ishlatish (Frontend)
 
-**To'g'ridan-to'g'ri macro chaqiruv:**
 ```json
-{
-  "@data[]": {
-    "@source": "activeEmployee"
-  }
-}
-```
+// To'g'ridan-to'g'ri
+{ "@data[]": { "@source": "activeEmployee" } }
 
-**Qo'shimcha filtr va parametrlar bilan:**
-```json
-{
-  "@data[]": {
-    "@source": "activeEmployee[$limit: 10, $order: id DESC]"
-  }
-}
-```
+// Qo'shimcha filtr bilan
+{ "@data[]": { "@source": "activeEmployee[$limit: 20, $order: id DESC]" } }
 
-**Macro'ni kengaytirib, yangi maydonlar qo'shish:**
-```json
+// Macro'ni kengaytirib
 {
   "@data": {
     "@source": "activeEmployee[id: 42]",
     "@fields": {
       "id":        "id",
-      "full_name": "full_name",
-      "positions[]": {
-        "@source": "positionCteTable[is_current: true]"
-      }
+      "full_name": "full_name"
+    },
+    "positions[]": {
+      "@source": "currentPosition[$limit: 5]"
     }
   }
 }
@@ -365,132 +336,105 @@ Tez-tez chaqiriladigan murakkab so'rovlarni oldindan yozib, istalgan joyda ishla
 
 ### 5. Tizim Introspeksiyasi (@info)
 
-Frontend dasturlari uchun qaysi jadvallar, qaysi maydonlar va qanday tipda ekanligini bilish imkonini beradi.
+Frontend uchun qaysi jadvallar, maydonlar va tiplar mavjudligini ko'rsatadi.
 
-**So'rov:**
 ```json
 { "@info": ["@tables", "@relations"] }
 ```
 
-**`@tables`** — Whitelist + DB `information_schema` dan jadval va maydon tiplari:
+SQL ni bazaga yuborib natija olasiz:
 ```json
 {
   "tables": {
     "emp": {
-      "id":        "integer",
-      "full_name": "character varying",
-      "status":    "integer",
-      "birthDay":  "character varying"
-    },
-    "departmentBasic": {
       "id":           "integer",
-      "name":         "character varying",
-      "status":       "integer",
+      "full_name":    "character varying",
+      "birthDay":     "character varying",
       "has_children": "boolean"
     }
   },
-  "relations": ["emp->org", "emp->dept", "dept->deptBasic"]
+  "relations": ["emp->dept", "dept->deptBasic", "deptBasic->org"]
 }
 ```
 
-> ✅ Virtual (expression) maydonlar uchun `"expression"` emas, balki **haqiqiy qaytariladigan tip** ko'rsatiladi (`boolean`, `character varying`, `numeric`, va hokazo).
+---
+
+### 6. Xavfsizlik Modeli
+
+UAQ Engine ko'p qatlamli himoya tizimiga ega. Backend **whitelist berishni majburiy** deb hisoblash kerak — whitelist bo'lmasa jadval/ustun mavjudligi tekshirilmaydi.
+
+| Qatlam                 | Himoya                                                                                                      |
+|------------------------|-------------------------------------------------------------------------------------------------------------|
+| **Parameterization**   | Barcha filtr qiymatlari `:p1`, `:p2` — SQL injection imkonsiz                                               |
+| **Whitelist**          | Frontend faqat ruxsat etilgan jadval/ustunlarga murojaat qiladi                                             |
+| **Global tahdid**      | `DROP`, `DELETE`, `UPDATE`, `INSERT`, `SELECT`, `UNION`, `--`, `/* */`, `;` qat'iy bloklanadi               |
+| **Funksiya ro'yxati**  | `@fields` da faqat ruxsat etilgan funksiyalar: `CONCAT`, `TO_CHAR`, `COALESCE`, `CASE WHEN`, `CAST` va h.k. |
+| **$order validatsiya** | Parse vaqtida `^[a-zA-Z0-9_\.]+(\s+(ASC\|DESC))?$` tekshiruvi                                               |
+| **$join validatsiya**  | Faqat: `left`, `right`, `inner`, `full`, `cross` (va kalit ekvivalentlari)                                  |
+| **$limit cheklovi**    | Maksimal `10 000` — katta so'rovlar avtomatik kesib qo'yiladi                                               |
+| **$rel validatsiya**   | Faqat `^[a-zA-Z0-9_]+$` formatda                                                                            |
+| **Alias majburiyati**  | Whitelist'da alias berilgan jadvalni haqiqiy nomi bilan chaqirish rad etiladi                               |
 
 ---
 
-## Frontend Uchun Qo'llanma
+## Frontend Qo'llanmasi
 
-Frontend dasturchi backend bilan kelishilgan whitelist alias nomlaridan foydalanib, deklarativ JSON so'rov yuboradi. SQL haqida bilim shart emas.
+Frontend dasturchi **SQL bilmaydi** — faqat qaysi ma'lumot kerakligini JSON orqali bildiradi.
 
 ### 1. So'rov Strukturasi
 
-Root kalit quyidagi uchta variantdan biri:
+Root kalit uchta variantdan biri:
 
-| Kalit     | Vazifasi                                       |
-|-----------|------------------------------------------------|
-| `@data`   | Bitta obyekt `{...}` qaytaradi                 |
-| `@data[]` | Massiv `[{...}, {...}]` qaytaradi              |
-| `@info`   | Jadval va relation strukturasi haqida ma'lumot |
+| Kalit     | Qaytariladi                                 |
+|-----------|---------------------------------------------|
+| `@data`   | Bitta obyekt `{...}` (LIMIT 1)              |
+| `@data[]` | Massiv `[{...}, ...]`                       |
+| `@info`   | Jadval strukturasi va relation ro'yxati     |
 
-**Minimal namuna:**
 ```json
 {
-  "@data[]": {
-    "@source": "emp[status: 1, $limit: 20]",
-    "@fields": ["id", "full_name"]
+  "@data[]": {                          ← massiv qaytaradi
+    "@source": "emp[status: 1]",        ← manba + filtrlar
+    "@fields": { "id": "id" }           ← qaytariladigan maydonlar
   }
 }
 ```
 
 ---
 
-### 2. Direktivalar
-
-| Direktiva  | Vazifasi                                                | Majburiy |
-|------------|---------------------------------------------------------|----------|
-| `@source`  | Manba jadval (alias), filtrlar va konfiguratsiya        | Ha       |
-| `@fields`  | Qaytariladigan maydonlar va ularni nomlash              | Yo'q     |
-| `@flatten` | Bola node maydonlarini ota nodega birlashtirib yuborish | Yo'q     |
-| `[]`       | Kalit oxiriga qo'shilsa — massiv (array) qaytaradi      | Yo'q     |
-
-#### `@source` Sintaksisi
+### 2. @source — Manba va Filtrlar
 
 ```
-alias[maydon: qiymat, maydon: operator qiymat, $limit: N, $offset: N, $order: ustun DIR, $join: tur, $rel: rel_nomi]
+alias[maydon: qiymat, $limit: N, $offset: N, $order: col DIR, $join: tur, $rel: nom]
 ```
 
-#### `@fields` Ikki Formatda
+#### 2.1. Filtr Operatorlari
 
-**Massiv (oddiy ismlash):**
+| Operator | SQL     | Misol                  |
+|----------|---------|------------------------|
+| `:`      | `=`     | `status: 1`            |
+| `!:`     | `!=`    | `type: !: 0`           |
+| `>`      | `>`     | `age: > 18`            |
+| `<`      | `<`     | `age: < 65`            |
+| `..`     | BETWEEN | `id: 1000..2000`       |
+| `~`      | LIKE    | `full_name: ~ Aliyev%` |
+| `in`     | IN      | `rank: in (1, 2, 3)`   |
+
 ```json
-"@fields": ["id", "full_name", "status"]
+"@source": "emp[status: 1, id: 61480..66580, full_name: ~ Ali%, rank: in (1, 2, 3), $limit: 20]"
 ```
 
-**Obyekt (qo'shimcha nomlash va iboralar):**
-```json
-"@fields": {
-  "employee_id":  "id",
-  "ism_sharif":   "full_name",
-  "tug_ilgan_kun": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')"
-}
-```
+> ✅ `in (1, 2, 3)` ichidagi vergullar filtrni ajratmaydi — to'g'ri parse qilinadi.
 
-> `"*"` — barcha ruxsat etilgan maydonlarni olish:
-> ```json
-> "@fields": ["*"]
-> ```
+#### 2.2. Konfiguratsiya Parametrlari
 
----
-
-### 3. Filtr Operatorlari
-
-`@source` ichida maydon filtrlari:
-
-| Operator | Ma'nosi          | Misol                |
-|----------|------------------|----------------------|
-| `:`      | Teng (=)         | `status: 1`          |
-| `!:`     | Teng emas (!=)   | `type: !: 0`         |
-| `>`      | Katta (>)        | `age: > 18`          |
-| `<`      | Kichik (<)       | `age: < 65`          |
-| `..`     | Oraliq (BETWEEN) | `id: 1..100`         |
-| `~`      | O'xshash (LIKE)  | `name: ~ Ali%`       |
-| `in`     | Ro'yxatda (IN)   | `rank: in (1, 2, 3)` |
-
-**Misol:**
-```json
-"@source": "emp[status: 1, id: 100..500, full_name: ~ Aliyev%, $limit: 10]"
-```
-
----
-
-### 4. Konfiguratsiya Parametrlari
-
-| Parametr  | Misol             | Izoh                            |
-|-----------|-------------------|---------------------------------|
-| `$limit`  | `$limit: 20`      | Qaytariladigan qatorlar soni    |
-| `$offset` | `$offset: 40`     | Skip qilish (sahifalash uchun)  |
-| `$order`  | `$order: id DESC` | Tartiblash (`ASC` yoki `DESC`)  |
-| `$join`   | `$join: left`     | JOIN turini qo'lda o'zgartirish |
-| `$rel`    | `$rel: emp_admin` | Aniq relation nomini ko'rsatish |
+| Parametr  | Misol             | Izoh                                             |
+|-----------|-------------------|--------------------------------------------------|
+| `$limit`  | `$limit: 20`      | Qaytariladigan maksimal qatorlar (max: 10 000)   |
+| `$offset` | `$offset: 40`     | Skip — sahifalash uchun                          |
+| `$order`  | `$order: id DESC` | `ustun_nomi [ASC\|DESC]` formatida               |
+| `$join`   | `$join: inner`    | JOIN turini qo'lda o'zgartirish                  |
+| `$rel`    | `$rel: emp_admin` | Bir necha relation bo'lganda aniq birini tanlash |
 
 **`$join` qiymatlari:**
 
@@ -500,49 +444,250 @@ alias[maydon: qiymat, maydon: operator qiymat, $limit: N, $offset: N, $order: us
 | `right` yoki `<-`   | RIGHT JOIN |
 | `inner` yoki `-><-` | INNER JOIN |
 | `full` yoki `<->`   | FULL JOIN  |
+| `cross`             | CROSS JOIN |
 
 ---
 
-### 5. Virtual Maydonlar Bilan Ishlash
+### 3. @fields — Maydonlar
 
-Backend whitelist'da virtual maydon (SQL expression) aniqlagan bo'lsa, frontend uni oddiy jadval ustuni kabi ishlatadi — hech qanday farq yo'q:
+#### 3.1. Massiv formatida (oddiy)
 
-**Backend whitelist:**
 ```json
-{
-  "shtat_department_basic:departmentBasic": {
-    "id":           "id",
-    "name":         "name_uz",
-    "status":       "status",
-    "has_children": "EXISTS(SELECT 1 FROM shtat_department_basic WHERE parent_id = departmentBasic.id)",
-    "is_current":   "CASE WHEN current_position = 1 THEN true ELSE false END",
-    "start_time":   "TO_CHAR(TO_TIMESTAMP(start_date), 'DD.MM.YYYY')"
-  }
+"@fields": ["id", "full_name", "status"]
+```
+
+Barcha ruxsat etilgan maydonlar:
+```json
+"@fields": ["*"]
+```
+
+#### 3.2. Obyekt formatida (qayta nomlash va ifodalar)
+
+```json
+"@fields": {
+  "employee_id":   "id",
+  "ism_sharif":    "full_name",
+  "tug_san":       "birthDay",
+  "formatlangan":  "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')",
+  "yosh":          "EXTRACT(YEAR FROM AGE(TO_TIMESTAMP(birthday)))"
 }
 ```
 
-**Frontend so'rovi (oddiy ustundek ishlatadi):**
+`"chiqish_kaliti": "manba_maydon_yoki_ifoda"` — chiqish JSON da `chiqish_kaliti` nomida, SQL da esa ifoda qiymatida ko'rinadi.
+
+Ruxsat etilgan SQL funksiyalar: `CONCAT`, `SUBSTR`, `UPPER`, `LOWER`, `TRIM`, `LENGTH`, `COALESCE`, `NULLIF`, `TO_CHAR`, `TO_TIMESTAMP`, `TO_DATE`, `NOW`, `EXTRACT`, `AGE`, `CAST`, `ROUND`, `CEIL`, `FLOOR`, `ABS`, `SPLIT_PART`, `CASE WHEN ... END` va boshqalar.
+
+---
+
+### 4. Ichma-ich So'rovlar
+
+#### 4.1. Bitta Ichki Obyekt (One-to-One)
+
 ```json
 {
   "@data[]": {
-    "@source": "departmentBasic[status: 1, has_children: true]",
-    "@fields": {
-      "id":           "id",
-      "name":         "name",
-      "has_children": "has_children",
-      "start_time":   "start_time"
+    "@source": "emp[status: 1, $limit: 10]",
+    "@fields": { "id": "id", "full_name": "full_name" },
+
+    "department": {
+      "@source": "departmentBasic[status: 1]",
+      "@fields": { "id": "id", "name": "name" }
     }
   }
 }
 ```
 
-> ✅ `has_children: true` — filtr sifatida ham ishlaydi. Engine qiymat `boolean` tipda ekanligini payqab, SQL'da `EXISTS(...) = true` ga o'giradi.
+Natija:
+```json
+[{
+  "id": 1, "full_name": "Aliyev Ali",
+  "department": { "id": 5, "name": "Moliya bo'limi" }
+}]
+```
+
+#### 4.2. Ichki Massiv (One-to-Many) — `[]` suffiks
+
+```json
+{
+  "@data": {
+    "@source": "emp[id: 42]",
+    "@fields": { "id": "id", "full_name": "full_name" },
+
+    "positions[]": {
+      "@source": "departmentStaffPosition[status: 1, is_current: true, $limit: 5]",
+      "@fields": { "id": "id", "begin_date": "start_time" }
+    },
+
+    "educations[]": {
+      "@source": "education[$limit: 10, $order: id DESC]",
+      "@fields": { "diploma_type": "diploma_type_name" }
+    }
+  }
+}
+```
+
+#### 4.3. @flatten — Maydonlarni Ota Nodega Birlashtirish
+
+```json
+"degree": {
+  "@source": "militaryDegree[current_degree: 1]",
+  "@flatten": true,
+  "@fields": { "degree_name": "name_uz", "degree_date": "given_date" }
+}
+```
+
+`@flatten: true` bilan `degree` obyekti o'rniga uning maydonlari to'g'ridan-to'g'ri ota nodega qo'shiladi:
+
+```
+Flattensiz: { ..., "degree": { "degree_name": "Mayor", "degree_date": "2020-01-01" } }
+Flattenli:  { ..., "degree_name": "Mayor", "degree_date": "2020-01-01" }
+```
 
 ---
 
-### 6. So'rov Namunalari
+### 5. Maxsus Maydon Funksiyalari
 
-#### Namuna 1: Oddiy Ro'yxat (Paginatsiya)
+Bu funksiyalar `@fields` ichida ishlatiladi va Engine tomonidan maxsus SQL ga aylantiriladi.
+
+---
+
+#### 5.1. `parents()` — Ierarxik Yo'l (Breadcrumb)
+
+Joriy nodening o'zi va barcha ajdodlarini root dan boshlab tartibli qaytaradi.
+
+```
+parents(parent_ustun, id_ustun, maydonlar)
+```
+
+**4 ta format:**
+
+```json
+"@fields": {
+  "dep_path":  "parents(parent_id, id, [name])",
+  "dep_multi": "parents(parent_id, id, [name, code])",
+  "dep_obj":   "parents(parent_id, id, {nn: name})",
+  "dep_str":   "parents(parent_id, id, name)"
+}
+```
+
+| Sintaksis          | Natija formati                                        |
+|--------------------|-------------------------------------------------------|
+| `[col]`            | `[{"col": "..."}, ...]` — JSON massiv                 |
+| `[col1, col2]`     | `[{"col1": "...", "col2": "..."}, ...]`               |
+| `{key: col}`       | `[{"key": "..."}, ...]` — custom kalit nomi           |
+| `{k1: c1, k2: c2}` | `[{"k1": "...", "k2": "..."}, ...]`                   |
+| `col`              | `"root, ..., joriy"` — vergul bilan ajratilgan string |
+
+**Natija tartibi:** root birinchi → joriy node oxirida (breadcrumb).
+
+**Misol:**
+```json
+{
+  "@data[]": {
+    "@source": "emp[status: 1, $limit: 10]",
+    "@fields": { "id": "id", "full_name": "full_name" },
+
+    "department": {
+      "@source": "departmentBasic",
+      "@fields": {
+        "id":       "id",
+        "name":     "name",
+        "dep_path": "parents(parent_id, id, [name])",
+        "dep_str":  "parents(parent_id, id, name)"
+      }
+    }
+  }
+}
+```
+
+Natija:
+```json
+{
+  "department": {
+    "id": 13743,
+    "name": "Ikkinchi guruh",
+    "dep_path": [
+      { "name": "To'rtinchi mintaqaviy hudud" },
+      { "name": "Saf bo'linmalari" },
+      { "name": "Patrul-post xizmati otryadi" },
+      { "name": "Ikkinchi guruh" }
+    ],
+    "dep_str": "To'rtinchi mintaqaviy hudud, Saf bo'linmalari, Patrul-post xizmati otryadi, Ikkinchi guruh"
+  }
+}
+```
+
+> ⚠️ `parents()` uchun `parent_ustun` va `id_ustun` whitelist'da bo'lishi shart.
+> Tsiklli ma'lumotlarda 50 daraja chegarasi avtomatik qo'llanadi.
+
+---
+
+#### 5.2. Lokal Aggregat Funksiyalar
+
+Agar bir node'ning **barcha** `@fields` qiymatlari aggregate funksiya bo'lsa va `@source` filtrlarida filtrsiz bo'lsa, Engine JOIN qilmay, har biri mustaqil correlated subquery sifatida generatsiya qiladi — natijalar to'g'ri va samarali.
+
+```json
+"education_data": {
+  "@source": "education",
+  "@fields": {
+    "jami":          "count(*)",
+    "oxirgi_yil":    "max(end_year)",
+    "eng_erta":      "min(end_year)",
+    "faollar":       "count([status: 1])",
+    "faol_id_yig":   "sum([status: 1].id)",
+    "o_rtacha_yil":  "avg([status: 1].end_year)"
+  }
+}
+```
+
+**Funksiyalar va sintaksis:**
+
+| Funksiya          | Sintaksis                | Ma'nosi                         |
+|-------------------|--------------------------|---------------------------------|
+| `count(*)`        | `count(*)`               | Barcha qatorlar soni            |
+| `count([f: v])`   | `count([status: 1])`     | Filtrlangan qatorlar soni       |
+| `max(col)`        | `max(end_year)`          | Maksimal qiymat                 |
+| `min(col)`        | `min(end_year)`          | Minimal qiymat                  |
+| `sum([f: v].col)` | `sum([status: 1].id)`    | Filtrlangan qatorlar yig'indisi |
+| `avg([f: v].col)` | `avg([status: 1].score)` | Filtrlangan qatorlar o'rtachasi |
+
+**Filter sintaksisi `[field: value]`** — `@source` filtri bilan bir xil operatorlar:
+
+```json
+"count([status: 1])"             ← status = 1
+"count([year: > 2020])"          ← year > 2020
+"sum([type: in (1, 2)].score)"   ← type IN (1, 2) bo'lganda score yig'indisi
+"max([active: !: 0].salary)"     ← active != 0 bo'lganda maksimal salary
+```
+
+> ⚠️ Lokal aggregat faqat **bitta darajada** ishlaydi: joriy node ning ota jadvali (`@data` ning manba jadvali) bilan bog'lanadi. Lokal aggregat node'da `@source` filtri bo'lsa, u JOIN qilinadi — barcha maydonlar aggregate bo'lishi talab qilinmaydi.
+
+---
+
+#### 5.3. Inline (Cross-Table) Aggregat Funksiyalar
+
+Boshqa jadvaldan (whitelist'dagi istalgan jadval) aggregate hisoblash:
+
+```
+func([filter].col)@jadval_alias[qo'shimcha_filtr]
+```
+
+```json
+"@fields": {
+  "positions_count":   "COUNT()@departmentStaffPosition[status: 1]",
+  "edu_count":         "COUNT()@education[status: 1]",
+  "max_salary":        "MAX([active: 1].salary)@salaryHistory",
+  "total_bonus":       "SUM([year: 2024].amount)@bonuses"
+}
+```
+
+Har biri mustaqil correlated subquery sifatida generatsiya qilinadi.
+
+---
+
+### 6. Amaliy Misollar
+
+#### Misol 1: Ro'yxat + Sahifalash
 
 ```json
 {
@@ -553,7 +698,7 @@ Backend whitelist'da virtual maydon (SQL expression) aniqlagan bo'lsa, frontend 
 }
 ```
 
-#### Namuna 2: Bitta Obyekt
+#### Misol 2: Bitta Xodim — To'liq Ma'lumot
 
 ```json
 {
@@ -564,122 +709,97 @@ Backend whitelist'da virtual maydon (SQL expression) aniqlagan bo'lsa, frontend 
       "full_name": "full_name",
       "birthDay":  "birthDay",
       "jshshir":   "jshshir"
-    }
-  }
-}
-```
-
-#### Namuna 3: Ichma-ich Massiv (One-to-Many)
-
-```json
-{
-  "@data": {
-    "@source": "emp[status: 1, id: 42]",
-    "@fields": { "id": "id", "full_name": "full_name" },
-
-    "positions[]": {
-      "@source": "departmentStaffPosition[status: 1, is_current: true, $limit: 5]",
-      "@fields": {
-        "id":         "id",
-        "begin_date": "start_time"
-      }
     },
-
-    "educations[]": {
-      "@source": "education[$limit: 10, $order: id DESC]",
-      "@fields": {
-        "id":           "id",
-        "diploma_type": "diploma_type_name"
-      }
-    }
-  }
-}
-```
-
-#### Namuna 4: @flatten bilan Daraxt Yasash
-
-`@flatten: true` — bola node maydonlarini ota nodega birlashtirib beradi, alohida ichki obyekt yaratilmaydi:
-
-```
-Flattensiz:  { "degree": { "id": 5, "info": { "name": "Kapitan" } } }
-Flattenli:   { "degree": { "id": 5, "name": "Kapitan" } }
-```
-
-```json
-{
-  "@data": {
-    "@source": "emp[status: 1, id: 1..100, $limit: 2, $order: id DESC]",
-    "@fields": { "id": "id", "full_name": "full_name", "birthDay": "birthDay" },
 
     "boshqarma": {
       "@source": "org[status: 1]",
       "@flatten": true,
-      "@fields": { "viloyat_name": "title" }
+      "@fields":  { "viloyat_name": "title" }
     },
 
-    "positions[]": {
-      "@source": "departmentStaffPosition[is_current: true, $limit: 5]",
-      "@fields": { "id": "id", "begin_date": "start_time" },
+    "lavozim": {
+      "@source": "departmentStaffPosition[status: 1, is_current: true]",
+      "@flatten": true,
+      "@fields":  { "begin_date": "start_time" },
 
-      "staffPosition": {
-        "@source": "staffPositionBasic[status: 1]",
+      "bo_lim": {
+        "@source": "departmentBasic[status: 1]",
         "@flatten": true,
-        "@fields": { "position_name": "name_uz" }
+        "@fields":  { "bo_lim_nomi": "name", "dep_path": "parents(parent_id, id, [name])" }
       }
     },
 
-    "degree": {
-      "@source": "militaryDegree[current_degree: 1]",
-      "@flatten": true,
-      "@fields": { "degree_name": "name_uz", "degree_date": "degree_given_time" }
+    "ta_limlar[]": {
+      "@source": "education[$limit: 5, $order: id DESC]",
+      "@fields":  { "diploma_turi": "diploma_type_name", "yil": "end_year" }
+    },
+
+    "statistika": {
+      "@source": "education",
+      "@fields":  {
+        "jami_ta_lim":  "count(*)",
+        "so_nggi_yil":  "max(end_year)",
+        "faol_soni":    "count([status: 1])"
+      }
     }
   }
 }
 ```
 
-**Natija strukturasi:**
-```json
-{
-  "id": 42,
-  "full_name": "Majidov Botir",
-  "birthDay": "01.01.1993",
-  "viloyat_name": "Jizzax viloyat",
-  "positions": [
-    { "id": 105, "begin_date": "01.06.2023", "position_name": "Buxgalter" },
-    { "id": 78,  "begin_date": "15.01.2021", "position_name": "Yordamchi" }
-  ],
-  "degree_name": "Kapitan",
-  "degree_date": "20.09.2022"
-}
-```
-
-#### Namuna 5: Virtual Maydon Bilan Filtr
+#### Misol 3: Ierarxik Bo'limlar
 
 ```json
 {
   "@data[]": {
-    "@source": "emp[status: 1, id: 21480..66580, $limit: 10]",
-    "@fields": { "id": "id", "jshshir": "jshshir", "full_name": "full_name" },
+    "@source": "emp[status: 1, id: 61480..66580, $limit: 10]",
+    "@fields": { "id": "id", "full_name": "full_name" },
 
-    "positions": {
-      "@source": "departmentStaffPosition[status: 1, is_current: true, has_children: true]",
-      "@fields": { "id": "id", "begin_date": "start_time" },
-
-      "ishJoyi": {
-        "@source": "departmentBasic[status: 1, id: 15202]",
-        "@fields": ["*"]
+    "department": {
+      "@source": "departmentBasic",
+      "@fields": {
+        "id":       "id",
+        "name":     "name",
+        "dep_path": "parents(parent_id, id, [name])",
+        "dep_obj":  "parents(parent_id, id, {title: name})",
+        "dep_str":  "parents(parent_id, id, name)"
       }
-    },
-
-    "educations[]": {
-      "@source": "education[$limit: 10, $order: id DESC]",
-      "@fields": { "id": "id", "diploma_type": "diploma_type_name" }
     }
   }
 }
 ```
 
-#### Namuna 6: Tizim Strukturasini O'qish
+#### Misol 4: Inline Aggregatlar
+
+```json
+{
+  "@data[]": {
+    "@source": "departmentBasic[status: 1, $limit: 50]",
+    "@fields": {
+      "id":             "id",
+      "name":           "name",
+      "xodimlar_soni":  "COUNT()@departmentStaffPosition[status: 1]",
+      "faol_xodimlar":  "COUNT()@departmentStaffPosition[status: 1, is_current: true]"
+    }
+  }
+}
+```
+
+#### Misol 5: Virtual Maydon Bilan Filtr
+
+```json
+{
+  "@data[]": {
+    "@source": "departmentBasic[status: 1, has_children: true, $limit: 20]",
+    "@fields": {
+      "id":           "id",
+      "name":         "name",
+      "has_children": "has_children"
+    }
+  }
+}
+```
+
+#### Misol 6: @info — Tizim Strukturasi
 
 ```json
 { "@info": ["@tables", "@relations"] }
@@ -687,149 +807,638 @@ Flattenli:   { "degree": { "id": 5, "name": "Kapitan" } }
 
 ---
 
-## Chiqish Formati (Output)
+## Chiqish Formati
 
-### Muvaffaqiyatli Natija
+### Muvaffaqiyatli natija
 
 ```json
 {
-  "isOk": true,
-  "sql": "SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) FROM (...) t",
-  "params": {
-    "p1": "1",
-    "p2": "42"
-  },
+  "isOk":    true,
+  "sql":     "SELECT COALESCE(json_agg(t.uaq_data), '[]'::json) FROM (...) t",
+  "params":  { "p1": 1, "p2": "Aliyev%", "p3": 20 },
   "message": "success"
 }
 ```
 
-### Xatolik Natijasi
+### Xatolik natijasi
 
 ```json
 {
-  "isOk": false,
-  "sql": null,
-  "params": null,
+  "isOk":    false,
+  "sql":     null,
+  "params":  null,
   "message": "Generation Error: Column 'password' does not exist in table 'emp'"
 }
 ```
 
-### `@info` Natijasi
+### @info natijasi
 
 ```json
 {
-  "isOk": true,
-  "sql": "WITH input_json AS (...) SELECT jsonb_build_object('tables', ...) AS result;",
-  "message": "info",
-  "relations": ["emp->org", "emp->dept"]
+  "isOk":      true,
+  "sql":       "WITH input_json AS (...) SELECT jsonb_build_object(...)",
+  "message":   "info",
+  "relations": ["emp->dept", "dept->deptBasic"]
 }
 ```
 
-SQL ni PostgreSQL ga yuborib:
+SQL ni bazaga yuborib natija olasiz:
 ```json
 {
   "tables": {
-    "emp": {
-      "id":        "integer",
-      "full_name": "character varying",
-      "status":    "integer",
-      "birthDay":  "character varying"
-    },
-    "departmentBasic": {
-      "id":           "integer",
-      "name":         "character varying",
-      "status":       "integer",
-      "has_children": "boolean"
-    }
+    "emp":             { "id": "integer", "full_name": "character varying", "birthDay": "character varying" },
+    "departmentBasic": { "id": "integer", "name": "character varying",     "has_children": "boolean" }
   },
-  "relations": ["emp->org", "emp->dept", "dept->deptBasic"]
+  "relations": ["emp->dept", "dept->deptBasic", "deptBasic->org"]
 }
 ```
 
 ---
 
-## Xavfsizlik
+## Cheklovlar va Xatolar
 
-UAQ Engine ko'p qatlamli xavfsizlik tizimiga ega:
+### Xavfsizlik sabab bloklanadigan so'rovlar
 
-| Qatlam                          | Tavsif                                                                                                   |
-|---------------------------------|----------------------------------------------------------------------------------------------------------|
-| **Parametrlash**                | Barcha filtr qiymatlari `:p1`, `:p2` shaklida — SQL injection imkonsiz                                   |
-| **Whitelist**                   | Frontend faqat ruxsat etilgan jadval va ustunlarga murojaat qila oladi                                   |
-| **Global Tahdid Detektori**     | `DROP`, `DELETE`, `--`, `/* */` kabi xavfli konstruktsiyalar qat'iy bloklanadi                           |
-| **Funksiya Ro'yxati**           | Faqat ruxsat etilgan SQL funksiyalar: `CONCAT`, `TO_CHAR`, `COALESCE`, `CASE WHEN`, `EXISTS` va hokazo   |
-| **Identifikator Validatsiyasi** | Jadval va ustun nomlari `[a-zA-Z0-9_]` dan tashqari belgilarni qabul qilmaydi                            |
-| **Alias Majburiyati**           | Whitelist'da alias berilgan jadvalga frontend to'g'ridan-to'g'ri haqiqiy nom bilan murojaat qila olmaydi |
+| Nima             | Sabab                                          |
+|------------------|------------------------------------------------|
+| `SELECT`         | Subquery injection oldini olish                |
+| `DROP`, `DELETE` | Strukturaviy manipulyatsiya                    |
+| `UNION`          | Ma'lumot o'g'irlash vektori                    |
+| `--`, `/* */`    | Comment injection                              |
+| `;`              | Ko'p-so'rov injection                          |
+| `EXEC`, `COPY`   | Tizim darajasidagi xavfli operatorlar          |
+
+### Umumiy xatolar va yechimlari
+
+| Xato xabari                                     | Sabab                                         | Yechim                                          |
+|-------------------------------------------------|-----------------------------------------------|-------------------------------------------------|
+| `Table 'X' does not exist`                      | Whitelist'da jadval yo'q yoki noto'g'ri alias | Whitelist'ga qo'shing yoki alias tekshiring     |
+| `Column 'X' does not exist in table 'Y'`        | Ustun whitelist'da yo'q                       | Whitelist'ga ustunni qo'shing                   |
+| `No connection for A->B`                        | Jadvallar orasida relation yo'q               | Relations'ga qo'shing yoki auto-path tekshiring |
+| `Unsafe or unsupported function call: X`        | Ruxsat etilmagan SQL funksiyasi               | Faqat ruxsat etilgan funksiyalardan foydalaning |
+| `Forbidden SQL operation detected: SELECT`      | @fields da SELECT ishlatilgan                 | Native SQL funksiyalar bilan almashtiring       |
+| `parents() string format supports only 1 field` | String formatda bir necha ustun               | `[col1, col2]` yoki `{k:col}` ishlatilsin       |
+
+### Chegaralar
+
+| Parametr               | Chegara    | Izoh                                            |
+|------------------------|------------|-------------------------------------------------|
+| `$limit`               | max 10 000 | Kattaroq qiymat avtomatik 10 000 ga tushiriladi |
+| `$offset`              | max 10 000 | `$limit` bilan bir xil qoida                    |
+| `parents()` chuqurligi | 50         | Tsiklli ma'lumotlarga qarshi himoya             |
 
 ---
 
-## Qo'shimcha Imkoniyatlar
+## Fayl Ma'lumotlarini Base64 ga Aylantirish
 
-### Fayl Ma'lumotlarini Base64 ga Aylantirish
+Bazadan kelgan JSON ichidagi fayl yo'llarini (masalan `/uploads/photo.jpg`) to'g'ridan-to'g'ri Base64 data URI ga o'giradi. Bitta API so'rovda ham ma'lumot, ham fayl tarkibini qaytarish uchun ishlatiladi.
 
-Bazadan kelgan JSON ichidagi fayl yo'llarini Base64 ga o'girish:
+### API
 
 ```c
 char* uaq_inject_base64_files(
     const char* json_result,     // Bazadan kelgan JSON string
-    const char* root_files_path, // "/var/www/my-project"
-    const char* trigger_prefix   // "/web/uploads/"
+    const char* root_files_path, // Fayllar joylashgan asosiy papka, masalan "/var/www/project"
+    const char* trigger_prefix   // Qaysi qiymatlarni o'girish kerak, masalan "/uploads/"
 );
 ```
 
-**PHP da:**
+- `json_result` — PostgreSQL dan kelgan JSON string (ichida fayl yo'llari bor)
+- `root_files_path` — serverda fayllar joylashgan papka (`/var/www/project`)
+- `trigger_prefix` — shu prefiksdagi qiymatlarni base64 ga o'giradi (`/uploads/`)
+
+### PHP misoli
+
 ```php
-$raw   = $ffi->uaq_inject_base64_files($dbJsonString, '/var/www/project', '/uploads/');
-$final = json_decode(\FFI::string($raw), true);
+// 1. UAQ orqali SQL va params oling
+$raw    = $ffi->uaq_parse($jsonInput, $whitelist, $relations, null);
+$result = json_decode(\FFI::string($raw), true);
 $ffi->uaq_free_string($raw);
+
+// 2. Bazaga yuboring
+$stmt = $pdo->prepare($result['sql']);
+$stmt->execute($result['params']);
+$dbJson = $stmt->fetchColumn();   // PostgreSQL json_agg natijasi
+
+// 3. Fayl yo'llarini base64 ga o'girish
+$raw2   = $ffi->uaq_inject_base64_files($dbJson, '/var/www/project', '/uploads/');
+$final  = json_decode(\FFI::string($raw2), true);
+$ffi->uaq_free_string($raw2);
 ```
 
-**Natija:**
+### Natija
+
 ```
-"/uploads/pasport.pdf" → "data:application/pdf;base64,JVBERi0x..."
+Avval:  { "photo": "/uploads/pasport.jpg" }
+Keyin:  { "photo": "data:image/jpeg;base64,/9j/4AAQSkZJRgAB..." }
 ```
 
-Qo'llab-quvvatlanadigan MIME turlar: `jpg/jpeg`, `png`, `gif`, `webp`, `svg`, `pdf`, `mp4` va boshqalar.
+Qo'llab-quvvatlanadigan MIME turlar:
 
-> **Qachon ishlatish kerak:** Loyihalar arasi bir martali ma'lumot uzatishda.
-> **Qachon ishlatmaslik kerak:** Umumiy ro'yxat endpointlarida — Base64 hajmni ~33% kattalashtiradi.
+| Kengaytma     | MIME                       |
+|---------------|----------------------------|
+| `jpg`, `jpeg` | `image/jpeg`               |
+| `png`         | `image/png`                |
+| `gif`         | `image/gif`                |
+| `webp`        | `image/webp`               |
+| `svg`         | `image/svg+xml`            |
+| `pdf`         | `application/pdf`          |
+| `mp4`         | `video/mp4`                |
+| Boshqa        | `application/octet-stream` |
+
+> ⚠️ **Qachon ishlatish kerak:** Bitta rekord batafsil ko'rinishida (bitta xodim kartasi, bitta hujjat).
+> **Qachon ishlatmaslik kerak:** Ro'yxat endpointlarida — Base64 hajmni ~33% kattalashtiradi.
 
 ---
 
-## Ko'p Tilli Integratsiya
+## Barcha Integratsiya Tillari
 
-| Platforma | Kutubxona formati | Usul                 |
-|-----------|-------------------|----------------------|
-| PHP       | `.so`             | FFI                  |
-| Python    | `.so`             | `ctypes` / `cffi`    |
-| Node.js   | `.wasm`           | WebAssembly          |
-| Java      | `.so`             | JNI / Project Panama |
-| Go        | `.so`             | `cgo`                |
+### PHP (FFI)
 
-**C-Header:**
-```c
-char* uaq_parse(
-    const char* json_input,
-    const char* whitelist,
-    const char* relations,
-    const char* macros_input
-);
+```php
+<?php
+class UAQEngine
+{
+    private \FFI $ffi;
 
-char* uaq_inject_base64_files(
-    const char* json_result,
-    const char* root_files_path,
-    const char* trigger_prefix
-);
+    public function __construct(string $soPath)
+    {
+        $this->ffi = \FFI::cdef("
+            char* uaq_parse(const char* json, const char* wl, const char* rels, const char* macros);
+            char* uaq_inject_base64_files(const char* json, const char* path, const char* prefix);
+            void  uaq_free_string(char* s);
+        ", $soPath);
+    }
 
-void uaq_free_string(char* s);
+    public function parse(string $json, string $whitelist, string $relations, ?string $macros = null): array
+    {
+        $raw    = $this->ffi->uaq_parse($json, $whitelist, $relations, $macros);
+        $result = json_decode(\FFI::string($raw), true);
+        $this->ffi->uaq_free_string($raw);
+        return $result;
+    }
+
+    public function injectFiles(string $jsonResult, string $rootPath, string $prefix): mixed
+    {
+        $raw    = $this->ffi->uaq_inject_base64_files($jsonResult, $rootPath, $prefix);
+        $result = json_decode(\FFI::string($raw), true);
+        $this->ffi->uaq_free_string($raw);
+        return $result;
+    }
+}
+
+// Ishlatish
+$uaq    = new UAQEngine(__DIR__ . '/libjson_to_sql.so');
+$result = $uaq->parse($jsonInput, $whitelist, $relations);
+
+if (!$result['isOk']) {
+    http_response_code(400);
+    echo json_encode(['error' => $result['message']]);
+    exit;
+}
+
+$stmt = $pdo->prepare($result['sql']);
+$stmt->execute($result['params']);
+$data = $stmt->fetchColumn();    // JSON string (PostgreSQL json_agg)
+echo $data;
 ```
 
 ---
 
-## Xulosa
+### Python (ctypes)
 
-UAQ Engine backend va frontend o'rtasidagi og'ir yuk — SQL yozish, JOIN qurish, xavfsizlikni ta'minlash — ni to'liq o'z zimmasiga oladi:
+```python
+import ctypes
+import json
+from typing import Optional
 
-- **Backend** faqat whitelist, relations va macros yozadi (bir marta)
-- **Frontend** deklarativ JSON yuboradi (har safar)
-- **UAQ** ikkalasini ko'priklab, xavfsiz va optimal SQL generatsiya qiladi
+class UAQEngine:
+    def __init__(self, so_path: str):
+        self.lib = ctypes.CDLL(so_path)
+        self.lib.uaq_parse.restype           = ctypes.c_char_p
+        self.lib.uaq_parse.argtypes          = [ctypes.c_char_p] * 4
+        self.lib.uaq_inject_base64_files.restype  = ctypes.c_char_p
+        self.lib.uaq_inject_base64_files.argtypes = [ctypes.c_char_p] * 3
+        self.lib.uaq_free_string.argtypes    = [ctypes.c_char_p]
+
+    def parse(self, json_input: str, whitelist: str, relations: str,
+              macros: Optional[str] = None) -> dict:
+        raw = self.lib.uaq_parse(
+            json_input.encode(),
+            whitelist.encode(),
+            relations.encode(),
+            macros.encode() if macros else None
+        )
+        result = json.loads(raw.decode())
+        self.lib.uaq_free_string(raw)
+        return result
+
+    def inject_files(self, json_result: str, root_path: str, prefix: str) -> dict:
+        raw = self.lib.uaq_inject_base64_files(
+            json_result.encode(),
+            root_path.encode(),
+            prefix.encode()
+        )
+        result = json.loads(raw.decode())
+        self.lib.uaq_free_string(raw)
+        return result
+
+# Ishlatish
+uaq    = UAQEngine('./libjson_to_sql.so')
+result = uaq.parse(json_input, whitelist, relations)
+
+if not result['isOk']:
+    raise ValueError(result['message'])
+
+# psycopg2 bilan
+cur.execute(result['sql'], result['params'])
+data = cur.fetchone()[0]    # JSON string
+```
+
+---
+
+### Node.js (ffi-napi)
+
+```js
+const ffi  = require('ffi-napi');
+const ref  = require('ref-napi');
+
+const lib = ffi.Library('./libjson_to_sql.so', {
+    uaq_parse: [
+        'string',
+        ['string', 'string', 'string', 'string']
+    ],
+    uaq_inject_base64_files: [
+        'string',
+        ['string', 'string', 'string']
+    ],
+    uaq_free_string: ['void', ['string']],
+});
+
+class UAQEngine {
+    parse(jsonInput, whitelist, relations, macros = null) {
+        const raw    = lib.uaq_parse(jsonInput, whitelist, relations, macros);
+        const result = JSON.parse(raw);
+        lib.uaq_free_string(raw);
+        return result;
+    }
+
+    injectFiles(jsonResult, rootPath, prefix) {
+        const raw    = lib.uaq_inject_base64_files(jsonResult, rootPath, prefix);
+        const result = JSON.parse(raw);
+        lib.uaq_free_string(raw);
+        return result;
+    }
+}
+
+// Ishlatish (Express.js)
+const uaq = new UAQEngine();
+
+app.post('/api/query', async (req, res) => {
+    const result = uaq.parse(
+        JSON.stringify(req.body),
+        WHITELIST,
+        RELATIONS
+    );
+
+    if (!result.isOk) {
+        return res.status(400).json({ error: result.message });
+    }
+
+    const { rows } = await pool.query(result.sql, Object.values(result.params));
+    res.json(rows[0]);
+});
+```
+
+---
+
+### Java (JNI + JNA)
+
+```java
+// pom.xml: net.java.dev.jna:jna:5.13.0
+
+import com.sun.jna.Library;
+import com.sun.jna.Native;
+import com.sun.jna.Pointer;
+
+public class UAQEngine {
+
+    interface UAQLib extends Library {
+        UAQLib INSTANCE = Native.load("json_to_sql", UAQLib.class);
+        Pointer uaq_parse(String json, String whitelist, String relations, String macros);
+        Pointer uaq_inject_base64_files(String jsonResult, String rootPath, String prefix);
+        void    uaq_free_string(Pointer s);
+    }
+
+    public Map<String, Object> parse(String json, String whitelist,
+                                     String relations, String macros) {
+        Pointer raw = UAQLib.INSTANCE.uaq_parse(json, whitelist, relations, macros);
+        try {
+            String resultStr = raw.getString(0);
+            return new ObjectMapper().readValue(resultStr, Map.class);
+        } finally {
+            UAQLib.INSTANCE.uaq_free_string(raw);
+        }
+    }
+}
+
+// Ishlatish
+UAQEngine uaq    = new UAQEngine();
+Map result       = uaq.parse(jsonInput, whitelist, relations, null);
+
+if (!(Boolean) result.get("isOk")) {
+    throw new RuntimeException((String) result.get("message"));
+}
+
+String sql           = (String) result.get("sql");
+Map<String, Object> params = (Map) result.get("params");
+
+// Spring JDBC bilan
+List<Map<String, Object>> data = namedJdbc.queryForList(sql, params);
+```
+
+---
+
+### Go (cgo)
+
+```go
+package uaq
+
+/*
+#cgo LDFLAGS: -L. -ljson_to_sql
+#include <stdlib.h>
+
+char* uaq_parse(const char* json, const char* wl, const char* rels, const char* macros);
+char* uaq_inject_base64_files(const char* json, const char* path, const char* prefix);
+void  uaq_free_string(char* s);
+*/
+import "C"
+import (
+    "encoding/json"
+    "unsafe"
+)
+
+type ParseResult struct {
+    IsOk    bool                   `json:"isOk"`
+    SQL     string                 `json:"sql"`
+    Params  map[string]interface{} `json:"params"`
+    Message string                 `json:"message"`
+}
+
+func Parse(jsonInput, whitelist, relations string, macros *string) (*ParseResult, error) {
+    cJson      := C.CString(jsonInput)
+    cWl        := C.CString(whitelist)
+    cRels      := C.CString(relations)
+    defer C.free(unsafe.Pointer(cJson))
+    defer C.free(unsafe.Pointer(cWl))
+    defer C.free(unsafe.Pointer(cRels))
+
+    var cMacros *C.char
+    if macros != nil {
+        cMacros = C.CString(*macros)
+        defer C.free(unsafe.Pointer(cMacros))
+    }
+
+    raw := C.uaq_parse(cJson, cWl, cRels, cMacros)
+    defer C.uaq_free_string(raw)
+
+    var result ParseResult
+    if err := json.Unmarshal([]byte(C.GoString(raw)), &result); err != nil {
+        return nil, err
+    }
+    return &result, nil
+}
+```
+
+---
+
+## Build va O'rnatish
+
+### Kutubxonani Kompilyatsiya Qilish
+
+```bash
+# Reliz versiyasi (.so faylini olish)
+cargo build --release
+
+# Natija:
+# target/release/libjson_to_sql.so   (Linux)
+# target/release/libjson_to_sql.dylib (macOS)
+# target/release/json_to_sql.dll      (Windows)
+```
+
+### .so Faylini Joylashtirish (Linux)
+
+```bash
+# Loyiha papkasiga nusxalash
+cp target/release/libjson_to_sql.so /var/www/your-project/
+
+# Yoki tizim kutubxona papkasiga
+sudo cp target/release/libjson_to_sql.so /usr/local/lib/
+sudo ldconfig
+```
+
+### PHP uchun php.ini Sozlamasi
+
+```ini
+; php.ini
+extension=ffi
+ffi.enable=true
+```
+
+### Testlarni Ishlatish
+
+```bash
+# Barcha testlar
+cargo test
+
+# Bitta test
+cargo test test_parents_cte_generation -- --nocapture
+
+# Reliz rejimida test
+cargo test --release
+```
+
+---
+
+## Best Practices
+
+### Backend Uchun
+
+**✅ To'g'ri: Whitelist'ni konfiguratsiya faylida saqlang**
+```php
+// config/whitelist.php
+return json_encode([
+    'employee:emp' => ['id', 'full_name', 'status', 'birthday'],
+    'education:edu' => ['id', 'status', 'end_year', 'diploma_type_name'],
+]);
+```
+
+**✅ To'g'ri: Relations'ni bir martalik konfiguratsiyada belgilang**
+```php
+// config/relations.php
+return json_encode([
+    'emp->edu'           => '@join @table ON @2.employee_id = @1.id',
+    'emp->dept'          => '@join @table ON @2.employee_id = @1.id',
+    'dept->deptBasic'    => '@join @table ON @2.id = @1.department_basic_id',
+    'deptBasic<->org'    => '@join @table ON @1.organization_id = @2.id',
+]);
+```
+
+**✅ To'g'ri: `uaq_free_string()` ni har doim chaqiring**
+```php
+$raw = $ffi->uaq_parse(...);
+try {
+    $result = json_decode(\FFI::string($raw), true);
+} finally {
+    $ffi->uaq_free_string($raw);   // try/finally — xato bo'lsa ham tozalanadi
+}
+```
+
+**✅ To'g'ri: `isOk` ni tekshirib so'ng SQL'ni ishlatilg**
+```php
+if (!$result['isOk']) {
+    // $result['message'] — xato sababi
+    // Log yozib foydalanuvchiga umumiy xato qaytaring
+    logger()->error('UAQ Error: ' . $result['message']);
+    return response()->json(['error' => 'So\'rov noto\'g\'ri'], 400);
+}
+$stmt = $pdo->prepare($result['sql']);
+$stmt->execute($result['params']);
+```
+
+**❌ Noto'g'ri: SQL ni string birlashtirish bilan ishlatish**
+```php
+// HECH QACHON BUNDAY QILMANG!
+$db->query($result['sql']);                          // params yo'q — injection xavfi
+$db->query($result['sql'] . " LIMIT " . $limit);    // qo'shimcha birlashtirish
+```
+
+**❌ Noto'g'ri: Whitelist'siz ishlatish (produksiyada)**
+```php
+// Test muhitida mumkin, lekin produksiyada XAVFLI
+$result = $uaq->parse($json, '{}', $relations);  // bo'sh whitelist
+```
+
+---
+
+### Frontend Uchun
+
+**✅ To'g'ri: `@info` dan foydalanib mavjud maydonlarni bilib oling**
+```json
+{ "@info": ["@tables"] }
+```
+Keyin qaytgan `tables` dan qaysi alias va maydonlar borligini bilasiz.
+
+**✅ To'g'ri: Filtrlarni to'g'ri formatda yozing**
+```json
+"@source": "emp[status: 1, id: in (1, 2, 3), name: ~ Ali%, age: > 18]"
+```
+
+**✅ To'g'ri: Lokal aggregatlardan foydalaning (JOIN oldini olish)**
+```json
+"stats": {
+  "@source": "education",
+  "@fields": {
+    "total":  "count(*)",
+    "active": "count([status: 1])",
+    "last":   "max(end_year)"
+  }
+}
+```
+
+**✅ To'g'ri: `parents()` bilan ierarxik ma'lumot oling**
+```json
+"department": {
+  "@source": "departmentBasic",
+  "@fields": {
+    "id":       "id",
+    "name":     "name",
+    "breadcrumb": "parents(parent_id, id, [name])",
+    "path_str":   "parents(parent_id, id, name)"
+  }
+}
+```
+
+**❌ Noto'g'ri: Bir martada haddan ko'p `parents()` chaqiruvi**
+```json
+// Har bir parents() — alohida WITH RECURSIVE = bazaga alohida so'rov
+// Kerak bo'lgan formatni tanlang, ikkalasini birga oling agar kerak bo'lsa
+"dep_path":  "parents(parent_id, id, [name])",        // JSON array uchun
+"dep_str":   "parents(parent_id, id, name)",           // String uchun — ikkala format kerak bo'lsa OK
+"dep_extra": "parents(parent_id, id, [name, code])",   // Bu ortiqcha agar faqat name kerak bo'lsa
+```
+
+**❌ Noto'g'ri: Haddan ko'p ichma-ich massiv (LATERAL per-row)**
+```json
+// Har bir [] LATERAL subquery — katta to'plamda sekin
+"@data[]": {
+  "@source": "emp[$limit: 1000]",
+  "positions[]":  { ... },     // 1000 lateral
+  "educations[]": { ... },     // 1000 lateral
+  "documents[]":  { ... }      // 1000 lateral — juda sekin!
+}
+```
+Katta ro'yxatlar uchun avval asosiy ma'lumotni, keyin alohida so'rovda tafsilotni oling.
+
+**✅ To'g'ri: Katta ro'yxatlar uchun $limit va $offset ishlating**
+```json
+"@source": "emp[status: 1, $limit: 50, $offset: 0, $order: id DESC]"
+```
+
+---
+
+## Tezkor Murojaat (Cheat Sheet)
+
+### @source to'liq sintaksisi
+```
+alias[
+  maydon: qiymat           → =
+  maydon: !: qiymat        → !=
+  maydon: > qiymat         → >
+  maydon: < qiymat         → <
+  maydon: qiymat1..qiymat2 → BETWEEN
+  maydon: ~ pattern%       → LIKE
+  maydon: in (1, 2, 3)    → IN
+
+  $limit:  N               → LIMIT N  (max 10 000)
+  $offset: N               → OFFSET N
+  $order:  col [ASC|DESC]  → ORDER BY
+  $join:   left|right|inner|full|cross
+  $rel:    relation_nomi   → aniq relation tanlash
+]
+```
+
+### @fields to'liq sintaksisi
+```json
+{
+  "chiqish_nomi": "ustun_nomi",
+  "chiqish_nomi": "FUNKSIYA(ustun)",
+  "chiqish_nomi": "CASE WHEN ... THEN ... END",
+  "chiqish_nomi": "parents(parent_col, id_col, [name])",
+  "chiqish_nomi": "parents(parent_col, id_col, {key: col})",
+  "chiqish_nomi": "parents(parent_col, id_col, name)",
+  "chiqish_nomi": "count(*)",
+  "chiqish_nomi": "count([field: value])",
+  "chiqish_nomi": "max(col)",
+  "chiqish_nomi": "min(col)",
+  "chiqish_nomi": "sum([field: value].col)",
+  "chiqish_nomi": "avg([field: value].col)",
+  "chiqish_nomi": "COUNT()@boshqa_jadval[filter]",
+  "chiqish_nomi": "SUM()@boshqa_jadval[filter].ustun"
+}
+```
+
+### Relation kalitlari
+```
+"A->B"         LEFT JOIN  A → B
+"A<-B"         RIGHT JOIN A → B
+"A-><-B"       INNER JOIN A ↔ B
+"A<->B"        FULL JOIN  A ↔ B
+"A->B:nom"     Nom bilan aniq relation
+```
+
+### Chiqish formati
+```json
+{ "isOk": true,  "sql": "...", "params": {"p1": 1}, "message": "success" }
+{ "isOk": false, "sql": null,  "params": null,       "message": "Xato..." }
+```
