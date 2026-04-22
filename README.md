@@ -424,8 +424,6 @@ alias[maydon: qiymat, $limit: N, $offset: N, $order: col DIR, $join: tur, $rel: 
 "@source": "emp[status: 1, id: 61480..66580, full_name: ~ Ali%, rank: in (1, 2, 3), $limit: 20]"
 ```
 
-> ✅ `in (1, 2, 3)` ichidagi vergullar filtrni ajratmaydi — to'g'ri parse qilinadi.
-
 #### 2.2. Konfiguratsiya Parametrlari
 
 | Parametr  | Misol             | Izoh                                             |
