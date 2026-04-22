@@ -605,12 +605,12 @@ Natija:
     "id": 13743,
     "name": "Ikkinchi guruh",
     "dep_path": [
-      { "name": "To'rtinchi mintaqaviy hudud" },
-      { "name": "Saf bo'linmalari" },
-      { "name": "Patrul-post xizmati otryadi" },
-      { "name": "Ikkinchi guruh" }
+      { "name": "Respublika boshqarmasi" },
+      { "name": "Hududiy boshqarma" },
+      { "name": "Tuman bo'limi" },
+      { "name": "Tarkibiy bo'linma" }
     ],
-    "dep_str": "To'rtinchi mintaqaviy hudud, Saf bo'linmalari, Patrul-post xizmati otryadi, Ikkinchi guruh"
+    "dep_str": "Respublika boshqarmasi, Hududiy boshqarma, Tuman bo'limi, Tarkibiy bo'linma"
   }
 }
 ```
