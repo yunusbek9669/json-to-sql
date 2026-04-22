@@ -746,23 +746,7 @@ Agar bir node'ning **barcha** `@fields` qiymatlari aggregate funksiya bo'lsa va 
 }
 ```
 
-#### Misol 4: Inline Aggregatlar
-
-```json
-{
-  "@data[]": {
-    "@source": "departmentBasic[status: 1, $limit: 50]",
-    "@fields": {
-      "id":             "id",
-      "name":           "name",
-      "xodimlar_soni":  "COUNT()@departmentStaffPosition[status: 1]",
-      "faol_xodimlar":  "COUNT()@departmentStaffPosition[status: 1, is_current: true]"
-    }
-  }
-}
-```
-
-#### Misol 5: Virtual Maydon Bilan Filtr
+#### Misol 4: Virtual Maydon Bilan Filtr
 
 ```json
 {
@@ -777,7 +761,7 @@ Agar bir node'ning **barcha** `@fields` qiymatlari aggregate funksiya bo'lsa va 
 }
 ```
 
-#### Misol 6: @info — Tizim Strukturasi
+#### Misol 5: @info — Tizim Strukturasi
 
 ```json
 { "@info": ["@tables", "@relations"] }
