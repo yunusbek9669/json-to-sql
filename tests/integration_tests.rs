@@ -312,7 +312,7 @@ fn test_parents_cte_generation() {
     // Explicit NULL termination at root
     assert!(sql.contains("departmentBasic_tree.parent_id IS NOT NULL"), "Must terminate at root via IS NOT NULL");
     // Depth limit
-    assert!(sql.contains("_depth < 50"), "Depth limit must be present");
+    assert!(sql.contains("_depth < 50"), "Depth limit must be present (default = 50)");
     // Root-first ordering
     assert!(sql.contains("ORDER BY _depth DESC"), "Must order root-first");
     // Each parents() call gets its own unique LATERAL alias → no naming conflicts

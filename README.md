@@ -554,29 +554,37 @@ Bu funksiyalar `@fields` ichida ishlatiladi va Engine tomonidan maxsus SQL ga ay
 Joriy nodening o'zi va barcha ajdodlarini root dan boshlab tartibli qaytaradi.
 
 ```
-parents(parent_ustun, id_ustun, maydonlar)
+parents(parent_ustun, id_ustun, maydonlar [, max_daraja])
 ```
 
-**4 ta format:**
+**Maydon formatlari + ixtiyoriy chuqurlik parametri:**
 
 ```json
 "@fields": {
   "dep_path":  "parents(parent_id, id, [name])",
+  "dep_path5": "parents(parent_id, id, [name], 5)",
   "dep_multi": "parents(parent_id, id, [name, code])",
   "dep_obj":   "parents(parent_id, id, {nn: name})",
   "dep_str":   "parents(parent_id, id, name)"
 }
 ```
 
-| Sintaksis          | Natija formati                                        |
-|--------------------|-------------------------------------------------------|
-| `[col]`            | `[{"col": "..."}, ...]` — JSON massiv                 |
-| `[col1, col2]`     | `[{"col1": "...", "col2": "..."}, ...]`               |
-| `{key: col}`       | `[{"key": "..."}, ...]` — custom kalit nomi           |
-| `{k1: c1, k2: c2}` | `[{"k1": "...", "k2": "..."}, ...]`                   |
-| `col`              | `"root, ..., joriy"` — vergul bilan ajratilgan string |
+| Sintaksis            | Natija formati                                        |
+|----------------------|-------------------------------------------------------|
+| `[col]`              | `[{"col": "..."}, ...]` — JSON massiv                 |
+| `[col1, col2]`       | `[{"col1": "...", "col2": "..."}, ...]`               |
+| `{key: col}`         | `[{"key": "..."}, ...]` — custom kalit nomi           |
+| `{k1: c1, k2: c2}`  | `[{"k1": "...", "k2": "..."}, ...]`                   |
+| `col`                | `"root, ..., joriy"` — vergul bilan ajratilgan string |
+| **4-arg:** `, N`     | Maksimal N daraja (standart = **50**)                 |
 
 **Natija tartibi:** root birinchi → joriy node oxirida (breadcrumb).
+
+> ⚠️ **`max_daraja` parametri (4-argument):**
+> - Standart: **50** — aksariyat ierarxiyalar uchun yetarli
+> - DB da `parent_id` zanjiri buzilgan (tsikl) bo'lsa ham faqat N darajagacha boradi
+> - Haqiqiy ierarxiya chuqurligidan 1-2 ta ortiq qo'ying: `parents(parent_id, id, [name], 8)`
+> - Ichki `_seen` array ham ishlaydi: bir xil ID ikki marta uchrasada darhol to'xtaydi
 
 **Misol:**
 ```json
@@ -1377,6 +1385,7 @@ alias[
   "chiqish_nomi": "FUNKSIYA(ustun)",
   "chiqish_nomi": "CASE WHEN ... THEN ... END",
   "chiqish_nomi": "parents(parent_col, id_col, [name])",
+  "chiqish_nomi": "parents(parent_col, id_col, [name], 8)",
   "chiqish_nomi": "parents(parent_col, id_col, {key: col})",
   "chiqish_nomi": "parents(parent_col, id_col, name)",
   "chiqish_nomi": "count(*)",

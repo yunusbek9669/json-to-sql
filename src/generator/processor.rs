@@ -145,8 +145,8 @@ impl SqlGenerator {
                         json_args.push(format!("'{}', {}", escape_sql_key(&k), proc));
                     }
                 }
-            } else if let Some((parent_col, child_col, fields, is_json)) = self.try_parse_parents_local(field_sql) {
-                let col_ref = self.build_parents_local(&parent_col, &child_col, &fields, is_json, &current_alias, &current_real)?;
+            } else if let Some((parent_col, child_col, fields, is_json, max_depth)) = self.try_parse_parents_local(field_sql) {
+                let col_ref = self.build_parents_local(&parent_col, &child_col, &fields, is_json, max_depth, &current_alias, &current_real)?;
                 json_args.push(format!("'{}', {}", escape_sql_key(field_key), col_ref));
             } else if let Some((func, filter_str, col)) = self.try_parse_local_agg(field_sql) {
                 let inline_sql = self.build_local_inline_agg(&func, filter_str, col, &current_alias, &current_real, context)?;
@@ -259,8 +259,8 @@ impl SqlGenerator {
                         inner_args.push(format!("'{}', {}", escape_sql_key(&k), proc));
                     }
                 }
-            } else if let Some((parent_col, child_col, fields, is_json)) = self.try_parse_parents_local(field_sql) {
-                let col_ref = self.build_parents_local(&parent_col, &child_col, &fields, is_json, child_alias, &real_table)?;
+            } else if let Some((parent_col, child_col, fields, is_json, max_depth)) = self.try_parse_parents_local(field_sql) {
+                let col_ref = self.build_parents_local(&parent_col, &child_col, &fields, is_json, max_depth, child_alias, &real_table)?;
                 inner_args.push(format!("'{}', {}", escape_sql_key(field_key), col_ref));
             } else if let Some((func, filter_str, col)) = self.try_parse_local_agg(field_sql) {
                 let inline_sql = self.build_local_inline_agg(&func, filter_str, col, child_alias, &real_table, Some((parent_alias, parent_real)))?;
@@ -308,7 +308,7 @@ impl SqlGenerator {
         !fields.is_empty() && fields.values().all(|v| self.try_parse_local_agg(v).is_some())
     }
 
-    // Returns (parent_col, child_col, fields: Vec<(output_key, column_name)>, is_json)
+    // Returns (parent_col, child_col, fields: Vec<(output_key, column_name)>, is_json, max_depth)
     //
     // Supported field syntaxes (3rd argument):
     //   [name]          → JSON array, key = column name         → [{"name": "..."}]
@@ -316,7 +316,14 @@ impl SqlGenerator {
     //   {nn:name}       → JSON array, custom key for column     → [{"nn": "..."}]
     //   {nn:name,kk:id} → JSON array, multiple custom mappings  → [{"nn": "...", "kk": "..."}]
     //   name            → plain string (string_agg)             → "root, ..., current"
-    pub(crate) fn try_parse_parents_local(&self, field_sql: &str) -> Option<(String, String, Vec<(String, String)>, bool)> {
+    //
+    // Optional 4th argument: max recursion depth (default = 10).
+    //   parents(parent_id, id, [name])     → depth = 10
+    //   parents(parent_id, id, [name], 5)  → depth = 5
+    //
+    // Keep this number as small as your real hierarchy depth + 1.
+    // This is the primary protection against corrupted parent_id chains in the data.
+    pub(crate) fn try_parse_parents_local(&self, field_sql: &str) -> Option<(String, String, Vec<(String, String)>, bool, u32)> {
         let text = field_sql.trim();
         let lower = text.to_lowercase();
         if !lower.starts_with("parents(") || !lower.ends_with(')') {
@@ -344,7 +351,7 @@ impl SqlGenerator {
             parts.push(current_part.trim().to_string());
         }
 
-        if parts.len() != 3 {
+        if parts.len() < 3 || parts.len() > 4 {
             return None;
         }
 
@@ -387,7 +394,14 @@ impl SqlGenerator {
             (vec![(col.clone(), col)], false)
         };
 
-        Some((parent_col, child_col, fields, is_json))
+        // Optional 4th parameter: max depth (positive integer, default = 50).
+        let max_depth: u32 = if parts.len() == 4 {
+            parts[3].trim().parse::<u32>().unwrap_or(50).max(1)
+        } else {
+            50
+        };
+
+        Some((parent_col, child_col, fields, is_json, max_depth))
     }
 
     // Generates a LATERAL JOIN for the parents() traversal and returns the column reference
@@ -405,6 +419,7 @@ impl SqlGenerator {
         child_col: &str,
         fields: &[(String, String)],   // (output_key, column_name)
         is_json: bool,
+        max_depth: u32,
         current_alias: &str,
         current_real: &str,
     ) -> Result<String, String> {
@@ -452,23 +467,32 @@ impl SqlGenerator {
             format!("COALESCE(string_agg({}::text, ', ' ORDER BY _depth DESC), '')", fields[0].1)
         };
 
-        // Canonical recursive form: CTE reference appears first in FROM so PostgreSQL's
-        // recursive evaluation substitutes only the working table, not the full table.
-        // `parent_id IS NOT NULL` explicitly terminates at the root without relying solely
-        // on a failed JOIN (handles both NULL and missing-row cases more clearly).
+        // Canonical recursive form: CTE reference first in FROM.
+        //
+        // Two termination guards work together:
+        //   1. _depth < max_depth  — primary stop: user-specified limit (default 10).
+        //      Set this to your real hierarchy depth + 1.  This is the cheapest check
+        //      and stops bad-data traversals before they scan many rows.
+        //   2. _seen array         — cycle stop: prevents revisiting the same ID.
+        //      ::text cast makes the array type-independent (int, bigint, uuid, text).
+        //
+        // Ordering: depth check comes first in the ON clause so PostgreSQL can short-
+        // circuit without evaluating the ANY() array scan for the common case.
         let lateral = format!(
             concat!(
                 "LEFT JOIN LATERAL (\n",
                 "  WITH RECURSIVE {cte} AS (\n",
-                "    SELECT {base_sel}, 1 AS _depth\n",
+                "    SELECT {base_sel}, 1 AS _depth, ARRAY[{ba}.{id}::text] AS _seen\n",
                 "    FROM {real} AS {ba}\n",
                 "    WHERE {ba}.{id} = {alias}.{id}\n",
                 "    UNION ALL\n",
-                "    SELECT {rec_sel}, {cte}._depth + 1 AS _depth\n",
+                "    SELECT {rec_sel}, {cte}._depth + 1 AS _depth,\n",
+                "           {cte}._seen || {ra}.{id}::text\n",
                 "    FROM {cte}\n",
                 "    JOIN {real} AS {ra} ON {ra}.{id} = {cte}.{pid}\n",
                 "      AND {cte}.{pid} IS NOT NULL\n",
-                "      AND {cte}._depth < 50\n",
+                "      AND {cte}._depth < {mdepth}\n",
+                "      AND NOT ({ra}.{id}::text = ANY({cte}._seen))\n",
                 "  )\n",
                 "  SELECT {agg} AS result FROM {cte}\n",
                 ") {lat} ON true"
@@ -482,6 +506,7 @@ impl SqlGenerator {
             pid      = parent_col,
             rec_sel  = rec_sel.join(", "),
             ra       = ra,
+            mdepth   = max_depth,
             agg      = agg,
             lat      = lat,
         );
