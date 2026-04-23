@@ -807,8 +807,8 @@ Agar bir node'ning **barcha** `@fields` qiymatlari aggregate funksiya bo'lsa va 
 {
   "isOk":      true,
   "sql":       "WITH input_json AS (...) SELECT jsonb_build_object(...)",
-  "message":   "info",
-  "relations": ["emp->dept", "dept->deptBasic"]
+  "params":    null,
+  "message":   "info"
 }
 ```
 

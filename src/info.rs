@@ -27,7 +27,6 @@ pub fn process_info_request(
         let rel_map: IndexMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
         let keys: Vec<String> = rel_map.keys().cloned().collect();
         included_relations = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
-        info_result.insert("relations".to_string(), json!(keys));
     }
 
     let mut build_args = vec![];
@@ -216,10 +215,7 @@ SELECT jsonb_build_object(
     if let Some(sql_val) = info_result.get("sql") {
         result["sql"] = sql_val.clone();
     }
-    if let Some(rels_val) = info_result.get("relations") {
-        result["relations"] = rels_val.clone();
-    }
-    
+
     result
 }
 
