@@ -4,9 +4,10 @@ use super::Guard;
 impl Guard {
     pub fn validate_table(&self, context: &str) -> Result<(), String> {
         Self::check_global_threats(context)?;
-        
-        let re = Regex::new(r"^[a-zA-Z0-9_]+$").unwrap();
-        if !re.is_match(context) {
+
+        static RE_TABLE: once_cell::sync::Lazy<Regex> =
+            once_cell::sync::Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_]+$").unwrap());
+        if !RE_TABLE.is_match(context) {
             return Err(format!("Invalid table name format: {}", context));
         }
 
@@ -22,12 +23,13 @@ impl Guard {
 
     pub fn validate_column(&self, context: &str, field: &str) -> Result<(), String> {
         Self::check_global_threats(field)?;
-        
-        let re = Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap();
-        if !re.is_match(field) {
+
+        static RE_COLUMN: once_cell::sync::Lazy<Regex> =
+            once_cell::sync::Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap());
+        if !RE_COLUMN.is_match(field) {
             return Err(format!("Invalid identifier format: {} in table {}", field, context));
         }
-        
+
         let raw_field = if let Some((_, col)) = field.split_once('.') {
             col
         } else {
@@ -49,14 +51,14 @@ impl Guard {
     pub fn validate_field(&self, context: &str, field: &str, local_aliases: Option<&std::collections::HashMap<String, String>>) -> Result<(), String> {
         Self::check_global_threats(field)?;
         let field_upper = field.trim().to_uppercase();
-        
+
         let builtins = vec![
-            "CONCAT", "CONCAT_WS", "SUBSTR", "SUBSTRING", "LEFT", "RIGHT", "REPLACE", "UPPER", "LOWER", 
-            "TRIM", "LTRIM", "RTRIM", "LENGTH", "CHAR_LENGTH", "POSITION", "COUNT", "SUM", "AVG", "MAX", 
-            "MIN", "COALESCE", "NULLIF", "GREATEST", "LEAST", "DATE_FORMAT", "TO_CHAR", "TO_TIMESTAMP", 
-            "TO_DATE", "NOW", "CURRENT_DATE", "CURRENT_TIMESTAMP", "CURRENT_TIME", "DATE_TRUNC", "EXTRACT", 
-            "AGE", "CAST", "ROUND", "CEIL", "FLOOR", "ABS", "POWER", "SQRT", "MOD", "SIGN", "SPLIT_PART", 
-            "JSON_EXTRACT_PATH_TEXT", "JSONB_EXTRACT_PATH_TEXT", "CASE", "WHEN", "THEN", "ELSE", "END", 
+            "CONCAT", "CONCAT_WS", "SUBSTR", "SUBSTRING", "LEFT", "RIGHT", "REPLACE", "UPPER", "LOWER",
+            "TRIM", "LTRIM", "RTRIM", "LENGTH", "CHAR_LENGTH", "POSITION", "COUNT", "SUM", "AVG", "MAX",
+            "MIN", "COALESCE", "NULLIF", "GREATEST", "LEAST", "DATE_FORMAT", "TO_CHAR", "TO_TIMESTAMP",
+            "TO_DATE", "NOW", "CURRENT_DATE", "CURRENT_TIMESTAMP", "CURRENT_TIME", "DATE_TRUNC", "EXTRACT",
+            "AGE", "CAST", "ROUND", "CEIL", "FLOOR", "ABS", "POWER", "SQRT", "MOD", "SIGN", "SPLIT_PART",
+            "JSON_EXTRACT_PATH_TEXT", "JSONB_EXTRACT_PATH_TEXT", "CASE", "WHEN", "THEN", "ELSE", "END",
             "AS", "IN", "IS", "NULL", "AND", "OR", "NOT", "TRUE", "FALSE"
         ];
 
@@ -64,15 +66,18 @@ impl Guard {
         if let Some(wl) = &self.whitelist {
             if let Some(rule) = wl.get(context) {
                 if !rule.is_allowed("*") {
-                    let re_str = Regex::new(r"'[^']*'").unwrap();
-                    let field_no_str = re_str.replace_all(field, "");
-                    let re_ident = Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap();
-                    
-                    for m in re_ident.find_iter(&field_no_str) {
+                    static RE_STR:   once_cell::sync::Lazy<Regex> =
+                        once_cell::sync::Lazy::new(|| Regex::new(r"'[^']*'").unwrap());
+                    static RE_IDENT: once_cell::sync::Lazy<Regex> =
+                        once_cell::sync::Lazy::new(|| Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap());
+                    let field_no_str = RE_STR.replace_all(field, "");
+                    let re_ident = &*RE_IDENT;
+
+                    for m in re_ident.find_iter(field_no_str.as_ref()) {
                         let ident = m.as_str();
                         if builtins.contains(&ident.to_uppercase().as_str()) { continue; }
                         if ident.parse::<f64>().is_ok() { continue; }
-                        
+
                         // FIX #10: when an identifier matches a local (flattened) alias,
                         // the identifier will be *substituted* with the alias SQL value by
                         // auto_prefix_field — the whitelist check for the current table is
@@ -85,7 +90,7 @@ impl Guard {
                                 continue;
                             }
                         }
-                        
+
                         // Strip potential prefix to match whitelist directly
                         let clean_ident = if let Some((_, col)) = ident.split_once('.') { col } else { ident };
                         if !rule.is_allowed(clean_ident) {
@@ -131,7 +136,7 @@ impl Guard {
                     return Ok(());
                 }
             }
-            self.validate_column(context, field)?; 
+            self.validate_column(context, field)?;
         }
         Ok(())
     }
@@ -142,12 +147,13 @@ impl Guard {
         if parts.is_empty() || parts.len() > 2 {
             return Err("Invalid ORDER BY format".to_string());
         }
-        
-        let re = Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap();
-        if !re.is_match(parts[0]) {
+
+        static RE_ORDER: once_cell::sync::Lazy<Regex> =
+            once_cell::sync::Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap());
+        if !RE_ORDER.is_match(parts[0]) {
             return Err("Invalid ORDER BY identifier format".to_string());
         }
-        
+
         if parts.len() == 2 {
             let dir = parts[1].to_uppercase();
             if dir != "ASC" && dir != "DESC" {

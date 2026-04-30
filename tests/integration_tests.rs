@@ -48,7 +48,10 @@ fn test_compact_format() {
 
     let sql_str = result.sql.as_ref().unwrap();
     assert!(sql_str.contains("SELECT COALESCE(json_agg(t.uaq_data), '[]'::json)"));
-    assert!(sql_str.contains("SELECT json_build_object("));
+    assert!(sql_str.contains("json_build_object("));
+    // DISTINCT ON deduplicates root rows multiplied by regular JOINs (Bug 5 fix)
+    assert!(sql_str.contains("DISTINCT ON (personal._uaq_rn)"));
+    assert!(sql_str.contains("ROW_NUMBER() OVER () AS _uaq_rn"));
     assert!(sql_str.contains("'id', personal.id"));
     assert!(sql_str.contains("CONCAT(personal.last_name_latin, ' ', personal.first_name_latin)"));
     assert!(sql_str.contains("INNER JOIN org ON personal.org_id = org.id"));
@@ -196,8 +199,9 @@ fn test_info_endpoint() {
     assert!(sql.contains("WITH input_json AS"));
     assert!(sql.contains("CONCAT(name)"));
     
-    let rels = result_json["relations"].as_array().unwrap();
-    assert_eq!(rels.len(), 2);
+    // Relations are embedded as ::jsonb inside the generated SQL, not a separate field
+    assert!(sql.contains("emp->org"));
+    assert!(sql.contains("org->dept"));
     
     uaq_free_string(result_ptr);
 }

@@ -19,7 +19,21 @@ pub fn process_files_in_json(json_val: &mut Value, root_dir: &str, trigger: &str
                 let mut path = PathBuf::from(root_dir);
                 let clean_s = s.trim_start_matches('/');
                 path.push(clean_s);
-                
+
+                // Canonicalize to resolve any `..` sequences, then verify the
+                // resolved path is still inside root_dir — prevents path traversal.
+                let canonical_root = match std::fs::canonicalize(root_dir) {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let canonical_path = match std::fs::canonicalize(&path) {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                if !canonical_path.starts_with(&canonical_root) {
+                    return;
+                }
+
                 if let Ok(bytes) = std::fs::read(&path) {
                     let b64 = STANDARD.encode(&bytes);
                     let ext = path.extension().and_then(|ex| ex.to_str()).unwrap_or("");

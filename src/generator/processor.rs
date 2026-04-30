@@ -434,6 +434,14 @@ impl SqlGenerator {
         self.param_counter += 1;
         let lat = format!("_plat{}", self.param_counter);
 
+        // Expand the PK/FK column names through the whitelist mapping so that the
+        // template SQL references the actual database column names.  The CTE column
+        // aliases (used inside the CTE for self-referential JOINs) keep the original
+        // logical key names so that {cte}.{pid} / {cte}.{id} resolve correctly.
+        // Expand the PK column name through the whitelist mapping. The FK (parent_col)
+        // is only referenced as a CTE alias inside the CTE, so it does not need expansion.
+        let id_real = self.guard.expand_mapped_fields(child_col, current_alias);
+
         let mut base_sel: Vec<String> = Vec::new();
         let mut rec_sel:  Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -478,21 +486,26 @@ impl SqlGenerator {
         //
         // Ordering: depth check comes first in the ON clause so PostgreSQL can short-
         // circuit without evaluating the ANY() array scan for the common case.
+        // Template uses two distinct "column name" concepts:
+        //   {id_real} / {pid_real} — actual DB column names (after whitelist mapping),
+        //                            used wherever we touch the physical table directly.
+        //   {id} / {pid}           — CTE alias names (= the original logical key names),
+        //                            used to reference columns inside the CTE result set.
         let lateral = format!(
             concat!(
                 "LEFT JOIN LATERAL (\n",
                 "  WITH RECURSIVE {cte} AS (\n",
-                "    SELECT {base_sel}, 1 AS _depth, ARRAY[{ba}.{id}::text] AS _seen\n",
+                "    SELECT {base_sel}, 1 AS _depth, ARRAY[{ba}.{id_real}::text] AS _seen\n",
                 "    FROM {real} AS {ba}\n",
-                "    WHERE {ba}.{id} = {alias}.{id}\n",
+                "    WHERE {ba}.{id_real} = {alias}.{id_real}\n",
                 "    UNION ALL\n",
                 "    SELECT {rec_sel}, {cte}._depth + 1 AS _depth,\n",
-                "           {cte}._seen || {ra}.{id}::text\n",
+                "           {cte}._seen || {ra}.{id_real}::text\n",
                 "    FROM {cte}\n",
-                "    JOIN {real} AS {ra} ON {ra}.{id} = {cte}.{pid}\n",
+                "    JOIN {real} AS {ra} ON {ra}.{id_real} = {cte}.{pid}\n",
                 "      AND {cte}.{pid} IS NOT NULL\n",
                 "      AND {cte}._depth < {mdepth}\n",
-                "      AND NOT ({ra}.{id}::text = ANY({cte}._seen))\n",
+                "      AND NOT ({ra}.{id_real}::text = ANY({cte}._seen))\n",
                 "  )\n",
                 "  SELECT {agg} AS result FROM {cte}\n",
                 ") {lat} ON true"
@@ -501,7 +514,7 @@ impl SqlGenerator {
             base_sel = base_sel.join(", "),
             real     = current_real,
             ba       = ba,
-            id       = child_col,
+            id_real  = id_real,
             alias    = current_alias,
             pid      = parent_col,
             rec_sel  = rec_sel.join(", "),
@@ -526,7 +539,7 @@ impl SqlGenerator {
                    else { return None; };
 
         if !text.ends_with(')') { return None; }
-        
+
         let inner = text[text.find('(').unwrap() + 1..text.len() - 1].trim();
 
         if inner == "*" {
