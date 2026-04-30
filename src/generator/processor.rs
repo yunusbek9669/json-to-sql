@@ -273,16 +273,50 @@ impl SqlGenerator {
             }
         }
         
+        // Resolve the join condition while still in the INNER context so that
+        // intermediate tables discovered via BFS can push their JOINs into
+        // self.joins — these will be captured as inner_joins below.
+        let join_condition = {
+            let res = self.resolve_relation(parent_alias, child_alias, parent_real, &real_table, &node.name)?;
+            if let Some(r) = res {
+                extract_on_condition(&r)?
+            } else {
+                // No direct relation — find the BFS path and build intermediate JOINs
+                // inside the lateral, with the outer parent correlated via the first hop.
+                let path = self.find_relation_path(parent_alias, child_alias)
+                    .ok_or_else(|| format!("No rel for {}->{}", parent_alias, child_alias))?;
+
+                // Correlation: ON condition extracted from the first hop (parent → path[1])
+                let first_real = self.guard.resolve_alias(&path[1])?;
+                let first_join = self.resolve_relation(parent_alias, &path[1], parent_real, &first_real, &path[1])?
+                    .ok_or_else(|| format!("No relation for path hop {}->{}", parent_alias, &path[1]))?;
+                let corr = extract_on_condition(&first_join)?;
+
+                // Intermediate JOINs: walk from the leaf (path[N-1], already FROM) back
+                // toward the first intermediate (path[1]), joining each table to its
+                // already-present neighbour.
+                for k in (1..path.len() - 1).rev() {
+                    let anchor = &path[k + 1];
+                    let to_join = path[k].clone();
+                    if self.joined_aliases.contains(&to_join) { continue; }
+                    let anchor_real = self.guard.resolve_alias(anchor)?;
+                    let to_real = self.guard.resolve_alias(&to_join)?;
+                    self.guard.validate_table(&to_join)?;
+                    let j = self.resolve_relation(anchor, &to_join, &anchor_real, &to_real, &to_join)?
+                        .ok_or_else(|| format!("No relation for lateral inner join {}->{}", anchor, to_join))?;
+                    self.joins.push(j);
+                    self.joined_aliases.insert(to_join);
+                }
+                corr
+            }
+        };
+
         let inner_joins = std::mem::replace(&mut self.joins, old_joins);
         let inner_wheres = std::mem::replace(&mut self.wheres, old_wheres);
         self.froms = old_froms;
         self.joined_aliases = old_aliases;
-        
+
         let json_obj = format!("json_build_object({})", inner_args.join(", "));
-        let join_condition = {
-            let res = self.resolve_relation(parent_alias, child_alias, parent_real, &real_table, &node.name)?;
-            match res { Some(r) => extract_on_condition(&r)?, None => return Err(format!("No rel for {}->{}", parent_alias, child_alias)) }
-        };
         let mut where_parts = vec![join_condition];
         for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?); }
         where_parts.extend(inner_wheres);

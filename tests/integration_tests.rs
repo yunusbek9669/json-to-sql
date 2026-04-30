@@ -454,3 +454,46 @@ fn test_security_fix_10_local_alias() {
     assert!(!sql.contains("emp.title"), "raw alias key must not appear as emp column");
 }
 
+#[test]
+fn test_lateral_list_multi_hop() {
+    // department[] is a list child reachable only via an intermediate table
+    // (emp → dept_pos → departmentBasic). build_lateral_subquery must discover
+    // the path via BFS and build inner JOINs correctly instead of erroring.
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 4]",
+            "@fields": { "id": "id", "full_name": "full_name" },
+            "department[]": {
+                "@source": "departmentBasic",
+                "@fields": {
+                    "id":   "id",
+                    "name": "name"
+                }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!(["id", "full_name", "status"]));
+    wl.insert("employee_department_staff_position:dept_pos".to_string(), json!(["*"]));
+    wl.insert("shtat_department_basic:departmentBasic".to_string(), json!(["id", "name"]));
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert("emp-><-dept_pos".to_string(), "INNER JOIN @table ON @1.id = @2.employee_id AND @2.status = 1".to_string());
+    rels.insert("dept_pos<->departmentBasic".to_string(), "INNER JOIN @table ON @1.department_basic_id = @2.id".to_string());
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let sql_gen = generator::SqlGenerator::new(Some(wl), Some(rels));
+    let result = sql_gen.generate(root).expect("list child via multi-hop should work");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("Multi-hop list SQL:\n{}", sql);
+
+    // Intermediate table must appear inside the LATERAL subquery
+    assert!(sql.contains("LEFT JOIN LATERAL"), "must use LATERAL for list child");
+    assert!(sql.contains("employee_department_staff_position AS dept_pos"), "intermediate table must be joined");
+    assert!(sql.contains("shtat_department_basic AS departmentBasic"), "leaf table must be FROM inside lateral");
+    // Correlation ties back to outer emp
+    assert!(sql.contains("emp.id"), "lateral must correlate to outer emp");
+}
+
