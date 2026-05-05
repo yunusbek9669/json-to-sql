@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use crate::parser;
 use crate::generator;
-use crate::info; // from info.rs
+use crate::info;
+use crate::operation;
 use crate::format::process_files_in_json;
 
 use indexmap::IndexMap;
@@ -107,6 +108,14 @@ pub extern "C" fn uaq_parse(
     } else {
         None
     };
+
+    // Check for @operation request (after whitelist is parsed)
+    if let Some(op_val) = parsed_json.get("@operation") {
+        if op_val.is_object() || op_val.is_array() {
+            let result = operation::process_operation(op_val, whitelist);
+            return encode_result(result);
+        }
+    }
 
     let root_node = match parser::parse_json(json_str, macros.as_ref()) {
         Ok(res) => res,

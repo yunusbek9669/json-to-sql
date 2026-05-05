@@ -497,3 +497,135 @@ fn test_lateral_list_multi_hop() {
     assert!(sql.contains("emp.id"), "lateral must correlate to outer emp");
 }
 
+
+#[test]
+fn test_operation_object_update_and_insert() {
+    let json_input = r#"{
+        "@operation": {
+            "emp[id: 4]": {
+                "l_name": "Soliyev",
+                "f_name": "Ali"
+            },
+            "departmentBasic": {
+                "dep_name": "IT"
+            }
+        }
+    }"#;
+
+    let whitelist = r#"{
+        "employees:emp": {
+            "l_name": "last_name",
+            "f_name": "first_name",
+            "id":     "emp_id"
+        },
+        "departments:departmentBasic": {
+            "dep_name": "name"
+        }
+    }"#;
+
+    let json_c = std::ffi::CString::new(json_input).unwrap();
+    let wl_c   = std::ffi::CString::new(whitelist).unwrap();
+
+    let ptr = uaq_parse(json_c.as_ptr(), wl_c.as_ptr(), std::ptr::null(), std::ptr::null());
+    assert!(!ptr.is_null());
+
+    let result_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    uaq_free_string(ptr);
+
+    let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+    assert_eq!(v["isOk"], true, "Expected isOk=true, got: {}", result_str);
+
+    let updates = v["data"]["update"].as_array().unwrap();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["filter"]["emp_id"], 4);
+    assert_eq!(updates[0]["employees"]["last_name"], "Soliyev");
+    assert_eq!(updates[0]["employees"]["first_name"], "Ali");
+
+    let inserts = v["data"]["insert"].as_array().unwrap();
+    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts[0]["departments"]["name"], "IT");
+
+    assert_eq!(v["rejected"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_operation_array_same_table_twice() {
+    let json_input = r#"{
+        "@operation": [
+            { "emp": { "l_name": "Ali",   "f_name": "Vali" } },
+            { "emp": { "l_name": "Karim", "f_name": "To'lqin" } }
+        ]
+    }"#;
+
+    let whitelist = r#"{
+        "employees:emp": {
+            "l_name": "last_name",
+            "f_name": "first_name"
+        }
+    }"#;
+
+    let json_c = std::ffi::CString::new(json_input).unwrap();
+    let wl_c   = std::ffi::CString::new(whitelist).unwrap();
+
+    let ptr = uaq_parse(json_c.as_ptr(), wl_c.as_ptr(), std::ptr::null(), std::ptr::null());
+    let result_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    uaq_free_string(ptr);
+
+    let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+    assert_eq!(v["isOk"], true, "Expected isOk=true, got: {}", result_str);
+
+    let inserts = v["data"]["insert"].as_array().unwrap();
+    assert_eq!(inserts.len(), 2, "Both rows must be inserted");
+    assert_eq!(inserts[0]["employees"]["last_name"], "Ali");
+    assert_eq!(inserts[1]["employees"]["last_name"], "Karim");
+}
+
+#[test]
+fn test_operation_rejected_unknown_field() {
+    let json_input = r#"{
+        "@operation": {
+            "emp": { "l_name": "Ali", "unknown_col": "hacker" }
+        }
+    }"#;
+
+    let whitelist = r#"{
+        "employees:emp": { "l_name": "last_name" }
+    }"#;
+
+    let json_c = std::ffi::CString::new(json_input).unwrap();
+    let wl_c   = std::ffi::CString::new(whitelist).unwrap();
+
+    let ptr = uaq_parse(json_c.as_ptr(), wl_c.as_ptr(), std::ptr::null(), std::ptr::null());
+    let result_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    uaq_free_string(ptr);
+
+    let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+    assert_eq!(v["isOk"], true);
+
+    let rejected = v["rejected"].as_array().unwrap();
+    assert!(rejected.contains(&serde_json::json!("unknown_col")));
+
+    let inserts = v["data"]["insert"].as_array().unwrap();
+    assert_eq!(inserts[0]["employees"]["last_name"], "Ali");
+}
+
+#[test]
+fn test_operation_threat_in_value() {
+    let json_input = r#"{
+        "@operation": {
+            "emp": { "l_name": "Ali'; DROP TABLE employees; --" }
+        }
+    }"#;
+
+    let whitelist = r#"{ "employees:emp": { "l_name": "last_name" } }"#;
+
+    let json_c = std::ffi::CString::new(json_input).unwrap();
+    let wl_c   = std::ffi::CString::new(whitelist).unwrap();
+
+    let ptr = uaq_parse(json_c.as_ptr(), wl_c.as_ptr(), std::ptr::null(), std::ptr::null());
+    let result_str = unsafe { CStr::from_ptr(ptr).to_str().unwrap().to_string() };
+    uaq_free_string(ptr);
+
+    let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+    assert_eq!(v["isOk"], false, "Should fail on SQL injection attempt");
+}
