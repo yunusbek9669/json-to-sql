@@ -157,31 +157,58 @@ pub extern "C" fn uaq_inject_base64_files(
     root_files_path: *const c_char,
     trigger_prefix: *const c_char
 ) -> *mut c_char {
-    if json_result.is_null() || root_files_path.is_null() || trigger_prefix.is_null() {
-        return create_error_result("Arguments cannot be null");
+    if json_result.is_null() {
+        return create_error_result("uaq_inject_base64_files: json_result is null — pass the DB query result as a JSON string");
+    }
+    if root_files_path.is_null() {
+        return create_error_result("uaq_inject_base64_files: root_files_path is null");
+    }
+    if trigger_prefix.is_null() {
+        return create_error_result("uaq_inject_base64_files: trigger_prefix is null");
     }
 
     let c_json = unsafe { CStr::from_ptr(json_result) };
     let json_str = match c_json.to_str() {
         Ok(s) => s,
-        Err(_) => return create_error_result("Invalid UTF-8 in json_result"),
+        Err(_) => return create_error_result("uaq_inject_base64_files: json_result is not valid UTF-8"),
     };
+
+    if json_str.is_empty() {
+        return create_error_result("uaq_inject_base64_files: json_result is an empty string — DB query likely returned no rows (false/null)");
+    }
 
     let mut parsed_json: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
-        Err(_) => return create_error_result("Invalid JSON format in json_result"),
+        Err(e) => return create_error_result(&format!(
+            "uaq_inject_base64_files: json_result is not valid JSON — {}. Received: {}",
+            e,
+            if json_str.len() > 80 { &json_str[..80] } else { json_str }
+        )),
     };
+
+    if !parsed_json.is_object() && !parsed_json.is_array() {
+        return create_error_result(&format!(
+            "uaq_inject_base64_files: json_result must be a JSON object or array, got: {}",
+            match &parsed_json {
+                serde_json::Value::Null    => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                _ => "unknown",
+            }
+        ));
+    }
 
     let c_root = unsafe { CStr::from_ptr(root_files_path) };
     let root_str = match c_root.to_str() {
         Ok(s) => s,
-        Err(_) => return create_error_result("Invalid UTF-8 in root_files_path"),
+        Err(_) => return create_error_result("uaq_inject_base64_files: root_files_path is not valid UTF-8"),
     };
 
     let c_trigger = unsafe { CStr::from_ptr(trigger_prefix) };
     let trigger_str = match c_trigger.to_str() {
         Ok(s) => s,
-        Err(_) => return create_error_result("Invalid UTF-8 in trigger_prefix"),
+        Err(_) => return create_error_result("uaq_inject_base64_files: trigger_prefix is not valid UTF-8"),
     };
 
     // Traverse the JSON and replace strings starting with trigger_str

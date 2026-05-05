@@ -37,12 +37,6 @@ pub fn process_info_request(
         let rel_escaped = included_relations.replace("'", "''");
         build_args.push(format!("'relations', '{}'::jsonb", rel_escaped));
     }
-    
-    let build_args_str = if build_args.is_empty() {
-        "'result', '{}'::jsonb".to_string()
-    } else {
-        build_args.join(",\n    ")
-    };
 
     let sql_query = if is_tables && whitelist_str.is_some() {
         let wl_str = whitelist_str.unwrap_or("{}");
@@ -97,10 +91,9 @@ pub fn process_info_request(
             } else {
                 (key.as_str(), key.as_str())
             };
-            
+
             let mut final_mappings = IndexMap::new();
-            if let Some(macro_val) = macros.get(alias).or_else(|| {
-                // Also check by the "name" part (before :)
+            let is_macro = if let Some(macro_val) = macros.get(alias).or_else(|| {
                 if let Some((n, _)) = key.split_once(':') {
                     macros.get(n)
                 } else {
@@ -109,25 +102,35 @@ pub fn process_info_request(
             }) {
                 // It's a macro - Collect all exposed fields with their real table:col mapping
                 final_mappings = collect_macro_fields(macro_val, &table_mappings);
-                
+
                 // Merge with whitelist's own fields for this macro alias
                 let current_source = macro_val.get("@source").and_then(|v| v.as_str());
                 let base_table_alias = current_source.map(|s| crate::parser::parse_source(s).table_name).unwrap_or_else(|| alias.to_string());
-                
+
                 if let Some(tm) = table_mappings.get(&base_table_alias) {
-                    process_fields(&val, &tm, &mut final_mappings, false); // Don't allow '*' from whitelist to force everything if macro says otherwise
+                    process_fields(&val, &tm, &mut final_mappings, false);
                 } else {
                     let tm_dummy = TableMapping { real_name: base_table_alias, col_map: HashMap::new(), unrestricted_star: true };
                     process_fields(&val, &tm_dummy, &mut final_mappings, false);
                 }
+                true
             } else {
                 // Normal table
                 if let Some(tm) = table_mappings.get(alias) {
                     process_fields(&val, tm, &mut final_mappings, true);
                 }
-            }
-            resolved_wl.insert(alias.to_string(), json!(final_mappings));
+                false
+            };
+
+            let display_key = if is_macro {
+                format!("{}(virtual)", alias)
+            } else {
+                alias.to_string()
+            };
+            resolved_wl.insert(display_key, json!(final_mappings));
         }
+
+        let build_args_str = build_args.join(",\n    ");
 
         let wl_final_str = serde_json::to_string(&resolved_wl).unwrap();
         let wl_escaped = wl_final_str.replace("'", "''");
@@ -151,13 +154,13 @@ parsed_columns AS (
     CROSS JOIN LATERAL jsonb_each_text(pt.col_data) obj
 ),
 joined_schema AS (
-    SELECT 
+    SELECT
         pc.table_alias,
-        CASE 
-            WHEN pc.real_col = '*' THEN c.column_name 
-            ELSE pc.col_alias 
+        CASE
+            WHEN pc.real_col = '*' THEN c.column_name
+            ELSE pc.col_alias
         END AS final_col_alias,
-        CASE 
+        CASE
             WHEN pc.real_col ~* 'THEN\s+(true|false)' THEN 'boolean'
             WHEN pc.real_col ~* '::boolean' THEN 'boolean'
             WHEN pc.real_col ~* '::(integer|int|bigint|smallint)' THEN 'integer'
@@ -173,22 +176,30 @@ joined_schema AS (
             WHEN pc.real_col ~* '^(JSONB_BUILD_OBJECT|JSONB_AGG|JSON_BUILD_OBJECT|JSON_AGG|ROW_TO_JSON|TO_JSONB|JSON_BUILD_ARRAY|JSONB_BUILD_ARRAY)\s*\(' THEN 'json'
             WHEN pc.real_col ~* '^(BOOL_AND|BOOL_OR|EVERY)\s*\(' THEN 'boolean'
             WHEN pc.real_col ~* '^COALESCE\s*\(' AND pc.real_col ~* '(true|false)' THEN 'boolean'
-            WHEN pc.real_col ~* '[\(\s]|CASE|WHEN|END' THEN 'expression' 
-            ELSE COALESCE(c.data_type, 'virtual') 
-        END AS data_type
+            WHEN pc.real_col ~ '[\(\s]' THEN 'virtual'
+            ELSE COALESCE(c.data_type, 'virtual')
+        END AS data_type,
+        pc.real_col ~ '[\(\s]' AS is_expression
     FROM parsed_columns pc
-    LEFT JOIN information_schema.columns c 
-      ON c.table_name = pc.table_name 
+    LEFT JOIN information_schema.columns c
+      ON c.table_name = pc.table_name
       AND c.table_schema = 'public'
       AND (pc.real_col = '*' OR c.column_name = pc.real_col)
 ),
 tables_json AS (
     SELECT jsonb_object_agg(table_alias, cols) AS tables_obj
     FROM (
-        SELECT table_alias, jsonb_object_agg(final_col_alias, data_type) AS cols
+        SELECT table_alias, jsonb_object_agg(
+            final_col_alias,
+            CASE
+                WHEN is_expression AND table_alias NOT LIKE '%(virtual)'
+                THEN data_type || '(virtual)'
+                ELSE data_type
+            END
+        ) AS cols
         FROM (
-            SELECT DISTINCT table_alias, final_col_alias, data_type 
-            FROM joined_schema 
+            SELECT DISTINCT table_alias, final_col_alias, data_type, is_expression
+            FROM joined_schema
             WHERE final_col_alias IS NOT NULL
         ) uniq
         GROUP BY table_alias
@@ -198,6 +209,11 @@ SELECT jsonb_build_object(
     {}
 ) AS result;"#, wl_escaped, build_args_str)
     } else {
+        let build_args_str = if build_args.is_empty() {
+            "'result', '{}'::jsonb".to_string()
+        } else {
+            build_args.join(",\n    ")
+        };
         format!(r#"SELECT jsonb_build_object(
     {}
 ) AS result;"#, build_args_str)
