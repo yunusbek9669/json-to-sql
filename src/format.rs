@@ -17,8 +17,9 @@ pub fn process_files_in_json(json_val: &mut Value, root_dir: &str, trigger: &str
         Value::String(s) => {
             if s.starts_with(trigger) {
                 let mut path = PathBuf::from(root_dir);
-                let clean_s = s.trim_start_matches('/');
-                path.push(clean_s);
+                let clean_s = s.trim_start_matches(['/', '\\']);
+                let normalized = clean_s.replace('\\', "/");
+                path.push(&normalized);
 
                 // Canonicalize to resolve any `..` sequences, then verify the
                 // resolved path is still inside root_dir — prevents path traversal.
