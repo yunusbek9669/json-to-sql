@@ -327,7 +327,8 @@ impl SqlGenerator {
         
         if let Some(order) = &source.order {
             if self.guard.is_safe_order_by(order).is_ok() {
-                let prefixed = Guard::auto_prefix_field(order, child_alias, None);
+                let expanded = self.guard.expand_mapped_fields(order, child_alias);
+                let prefixed = Guard::auto_prefix_field(&expanded, child_alias, None);
                 inner_sql.push_str(&format!("\n    ORDER BY {}", prefixed));
             }
         }

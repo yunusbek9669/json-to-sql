@@ -84,7 +84,8 @@ impl SqlGenerator {
             }
             if let Some(order) = &order_opt {
                 if self.guard.is_safe_order_by(order).is_ok() {
-                    let prefixed = Guard::auto_prefix_field(order, root_alias, None);
+                    let expanded = self.guard.expand_mapped_fields(order, root_alias);
+                    let prefixed = Guard::auto_prefix_field(&expanded, root_alias, None);
                     root_sub.push_str(&format!("\n    ORDER BY {}", prefixed));
                 }
             }
@@ -128,7 +129,8 @@ impl SqlGenerator {
                 let root_alias = &source.table_name;
                 if let Some(order) = &source.order {
                     if self.guard.is_safe_order_by(order).is_ok() {
-                        let prefixed_order = Guard::auto_prefix_field(order, root_alias, None);
+                        let expanded = self.guard.expand_mapped_fields(order, root_alias);
+                        let prefixed_order = Guard::auto_prefix_field(&expanded, root_alias, None);
                         base_sql.push_str("\nORDER BY ");
                         base_sql.push_str(&prefixed_order);
                     }
