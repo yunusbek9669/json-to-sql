@@ -13,7 +13,8 @@
   - [3. Relations — Avtomatik JOIN](#3-relations--avtomatik-join)
   - [4. Macros — Qayta Ishlatiluvchi Shablonlar](#4-macros--qayta-ishlatiluvchi-shablonlar)
   - [5. Tizim Introspeksiyasi (@info)](#5-tizim-introspeksiyasi-info)
-  - [6. Xavfsizlik Modeli](#6-xavfsizlik-modeli)
+  - [6. @operation — Yozish Operatsiyalari](#6-operation--yozish-operatsiyalari)
+  - [7. Xavfsizlik Modeli](#7-xavfsizlik-modeli)
 - [Frontend Qo'llanmasi](#frontend-qollanmasi)
   - [1. So'rov Strukturasi](#1-sorov-strukturasi)
   - [2. @source — Manba va Filtrlar](#2-source--manba-va-filtrlar)
@@ -359,7 +360,209 @@ SQL ni bazaga yuborib natija olasiz:
 
 ---
 
-### 6. Xavfsizlik Modeli
+### 6. @operation — Yozish Operatsiyalari
+
+`@operation` — ma'lumotlarni **yozish** (INSERT / UPDATE) uchun mo'ljallangan endpoint. `@data` kabi SQL generatsiya **qilmaydi** — buning o'rniga whitelist orqali tekshirilgan, real ustun nomlariga moslangan tayyor ma'lumot strukturasini qaytaradi. Backend shu natijadan foydalanib o'z prepared statement larini tuzadi.
+
+#### 6.1. So'rov Formati
+
+```
+"@source_string": { "virtual_col": value, ... }
+```
+
+- **Filtrsiz** `@source` → `insert` ro'yxatiga tushadi
+- **Filtri bor** `@source` → `update` ro'yxatiga tushadi (filter alohida ajratiladi)
+- Whitelist'da **yo'q ustun** → `rejected` ro'yxatiga tushadi (xatolik chiqarmaydi)
+
+Bir so'rovda bir necha jadval aralash — **object** yoki **array** ko'rinishida beriladi:
+
+```json
+{ "@operation": { ... } }
+```
+```json
+{ "@operation": [ { ... }, { ... } ] }
+```
+
+#### 6.2. INSERT — Filtrsiz Yozish
+
+```json
+{
+  "@operation": {
+    "emp": {
+      "full_name": "Aliyev Ali",
+      "status":    1,
+      "birthday":  "1990-05-15"
+    }
+  }
+}
+```
+
+Natija:
+```json
+{
+  "isOk": true,
+  "data": {
+    "update": [],
+    "insert": [
+      { "employee": { "full_name": "Aliyev Ali", "status": 1, "birthday": "1990-05-15" } }
+    ]
+  },
+  "rejected": [],
+  "message": "success"
+}
+```
+
+> Whitelist'da `"employee:emp"` bo'lsa, `emp` → `employee` ga avtomatik o'giriladi va maydon mapping qo'llanadi.
+
+#### 6.3. UPDATE — Filtri Bilan Yozish
+
+```json
+{
+  "@operation": {
+    "emp[id: 42]": {
+      "full_name": "Karimov Bobur",
+      "status":    0
+    }
+  }
+}
+```
+
+Natija:
+```json
+{
+  "isOk": true,
+  "data": {
+    "update": [
+      {
+        "filter":   { "id": 42 },
+        "employee": { "full_name": "Karimov Bobur", "status": 0 }
+      }
+    ],
+    "insert": []
+  },
+  "rejected": [],
+  "message": "success"
+}
+```
+
+#### 6.4. Bir Necha Jadval — Array Ko'rinishida
+
+```json
+{
+  "@operation": [
+    {
+      "emp[id: 42]": { "status": 0 }
+    },
+    {
+      "education": { "employee_id": 42, "end_year": 2020, "diploma_type_name": "Bakalavr" }
+    }
+  ]
+}
+```
+
+Natija:
+```json
+{
+  "isOk": true,
+  "data": {
+    "update": [
+      { "filter": { "id": 42 }, "employee": { "status": 0 } }
+    ],
+    "insert": [
+      { "employee_education": { "employee_id": 42, "end_year": 2020, "diploma_type_name": "Bakalavr" } }
+    ]
+  },
+  "rejected": [],
+  "message": "success"
+}
+```
+
+#### 6.5. `rejected` — Whitelist'da Yo'q Maydonlar
+
+Whitelist'da ko'rsatilmagan ustunlar xatolik chiqarmasdan `rejected` ro'yxatiga tushadi:
+
+```json
+{
+  "@operation": {
+    "emp[id: 5]": {
+      "full_name": "Ali",
+      "password":  "secret123"
+    }
+  }
+}
+```
+
+Natija:
+```json
+{
+  "isOk": true,
+  "data": {
+    "update": [{ "filter": { "id": 5 }, "employee": { "full_name": "Ali" } }],
+    "insert": []
+  },
+  "rejected": ["password"],
+  "message": "success"
+}
+```
+
+> `rejected` bo'sh bo'lsa ham tekshirib oling — backend log yoki audit uchun ishlatishi mumkin.
+
+#### 6.6. PHP Misoli
+
+```php
+$operationJson = json_encode([
+    '@operation' => [
+        ['emp[id: 42]'  => ['full_name' => 'Aliyev Ali', 'status' => 1]],
+        ['education'    => ['employee_id' => 42, 'end_year' => 2021]],
+    ]
+]);
+
+$raw    = $ffi->uaq_parse($operationJson, $whitelist, $relations, null);
+$result = json_decode(\FFI::string($raw), true);
+$ffi->uaq_free_string($raw);
+
+if (!$result['isOk']) {
+    throw new \RuntimeException($result['message']);
+}
+
+// rejected maydonlarni loglash
+if (!empty($result['rejected'])) {
+    logger()->warning('UAQ rejected fields: ' . implode(', ', $result['rejected']));
+}
+
+$pdo->beginTransaction();
+try {
+    foreach ($result['data']['update'] as $entry) {
+        $filter = $entry['filter'];
+        unset($entry['filter']);
+        [$table, $fields] = [array_key_first($entry), reset($entry)];
+
+        $setClauses    = implode(', ', array_map(fn($c) => "$c = :set_$c", array_keys($fields)));
+        $whereClauses  = implode(' AND ', array_map(fn($c) => "$c = :where_$c", array_keys($filter)));
+        $params        = array_merge(
+            array_combine(array_map(fn($c) => "set_$c",   array_keys($fields)),  $fields),
+            array_combine(array_map(fn($c) => "where_$c", array_keys($filter)),  $filter),
+        );
+        $pdo->prepare("UPDATE $table SET $setClauses WHERE $whereClauses")->execute($params);
+    }
+
+    foreach ($result['data']['insert'] as $entry) {
+        [$table, $fields] = [array_key_first($entry), reset($entry)];
+        $cols   = implode(', ', array_keys($fields));
+        $places = implode(', ', array_map(fn($c) => ":$c", array_keys($fields)));
+        $pdo->prepare("INSERT INTO $table ($cols) VALUES ($places)")->execute($fields);
+    }
+
+    $pdo->commit();
+} catch (\Throwable $e) {
+    $pdo->rollBack();
+    throw $e;
+}
+```
+
+---
+
+### 7. Xavfsizlik Modeli
 
 UAQ Engine ko'p qatlamli himoya tizimiga ega. Backend **whitelist berishni majburiy** deb hisoblash kerak — whitelist bo'lmasa jadval/ustun mavjudligi tekshirilmaydi.
 

@@ -31,11 +31,11 @@ pub fn process_info_request(
 
     let mut build_args = vec![];
     if is_tables && whitelist_str.is_some() {
-        build_args.push("'tables', COALESCE((SELECT tables_obj FROM tables_json), '{}'::jsonb)".to_string());
+        build_args.push("'tables', COALESCE((SELECT tables_obj FROM tables_json), '{}'::json)".to_string());
     }
     if is_relations {
         let rel_escaped = included_relations.replace("'", "''");
-        build_args.push(format!("'relations', '{}'::jsonb", rel_escaped));
+        build_args.push(format!("'relations', '{}'::json", rel_escaped));
     }
 
     let sql_query = if is_tables && whitelist_str.is_some() {
@@ -130,22 +130,57 @@ pub fn process_info_request(
             resolved_wl.insert(display_key, json!(final_mappings));
         }
 
+        // Build position tracking for whitelist-order preservation
+        let mut table_pos_values: Vec<String> = Vec::new();
+        let mut col_pos_values: Vec<String> = Vec::new();
+
+        for (tbl_pos, (tbl_alias, cols_val)) in resolved_wl.iter().enumerate() {
+            let tbl_alias_esc = tbl_alias.replace('\'', "''");
+            table_pos_values.push(format!("('{}', {})", tbl_alias_esc, tbl_pos + 1));
+
+            if let Some(cols_obj) = cols_val.as_object() {
+                for (col_pos, col_alias) in cols_obj.keys().enumerate() {
+                    if col_alias != "*" {
+                        let col_alias_esc = col_alias.replace('\'', "''");
+                        col_pos_values.push(format!(
+                            "('{}', '{}', {})",
+                            tbl_alias_esc, col_alias_esc, col_pos + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        let tbl_ord_cte = if table_pos_values.is_empty() {
+            "tbl_ord(tbl_alias, tbl_pos) AS (SELECT NULL::text, NULL::int WHERE false)".to_string()
+        } else {
+            format!("tbl_ord(tbl_alias, tbl_pos) AS (VALUES {})", table_pos_values.join(", "))
+        };
+
+        let col_ord_cte = if col_pos_values.is_empty() {
+            "col_ord(tbl_alias, col_key, col_pos) AS (SELECT NULL::text, NULL::text, NULL::int WHERE false)".to_string()
+        } else {
+            format!("col_ord(tbl_alias, col_key, col_pos) AS (VALUES {})", col_pos_values.join(", "))
+        };
+
         let build_args_str = build_args.join(",\n    ");
 
         let wl_final_str = serde_json::to_string(&resolved_wl).unwrap();
         let wl_escaped = wl_final_str.replace("'", "''");
 
-        format!(r#"WITH input_json AS (
-    SELECT '{}'::jsonb AS data
+        format!(r#"WITH {tbl_ord},
+{col_ord},
+input_json AS (
+    SELECT '{wl}'::jsonb AS data
 ),
 parsed_tables AS (
-    SELECT 
+    SELECT
         key AS table_alias,
         value AS col_data
     FROM input_json, jsonb_each(data)
 ),
 parsed_columns AS (
-    SELECT 
+    SELECT
         pt.table_alias,
         split_part(obj.value, ':', 1) AS table_name,
         substr(obj.value, length(split_part(obj.value, ':', 1)) + 2) AS real_col,
@@ -160,6 +195,7 @@ joined_schema AS (
             WHEN pc.real_col = '*' THEN c.column_name
             ELSE pc.col_alias
         END AS final_col_alias,
+        c.ordinal_position AS db_col_pos,
         CASE
             WHEN pc.real_col ~* 'THEN\s+(true|false)' THEN 'boolean'
             WHEN pc.real_col ~* '::boolean' THEN 'boolean'
@@ -187,34 +223,47 @@ joined_schema AS (
       AND (pc.real_col = '*' OR c.column_name = pc.real_col)
 ),
 tables_json AS (
-    SELECT jsonb_object_agg(table_alias, cols) AS tables_obj
+    SELECT json_object_agg(sub.table_alias, sub.cols ORDER BY sub.tbl_pos) AS tables_obj
     FROM (
-        SELECT table_alias, jsonb_object_agg(
-            final_col_alias,
-            CASE
-                WHEN is_expression AND table_alias NOT LIKE '%(virtual)'
-                THEN data_type || '(virtual)'
-                ELSE data_type
-            END
-        ) AS cols
+        SELECT
+            uniq.table_alias,
+            json_object_agg(
+                uniq.final_col_alias,
+                CASE
+                    WHEN uniq.is_expression AND uniq.table_alias NOT LIKE '%(virtual)'
+                    THEN uniq.data_type || '(virtual)'
+                    ELSE uniq.data_type
+                END
+                ORDER BY COALESCE(co.col_pos, uniq.db_col_pos, 9999)
+            ) AS cols,
+            COALESCE(to_.tbl_pos, 9999) AS tbl_pos
         FROM (
-            SELECT DISTINCT table_alias, final_col_alias, data_type, is_expression
+            SELECT DISTINCT ON (table_alias, final_col_alias)
+                table_alias, final_col_alias, data_type, is_expression, db_col_pos
             FROM joined_schema
             WHERE final_col_alias IS NOT NULL
+            ORDER BY table_alias, final_col_alias
         ) uniq
-        GROUP BY table_alias
-    ) subquery
+        LEFT JOIN tbl_ord to_ ON to_.tbl_alias = uniq.table_alias
+        LEFT JOIN col_ord co ON co.tbl_alias = uniq.table_alias AND co.col_key = uniq.final_col_alias
+        GROUP BY uniq.table_alias, to_.tbl_pos
+    ) sub
 )
-SELECT jsonb_build_object(
-    {}
-) AS result;"#, wl_escaped, build_args_str)
+SELECT json_build_object(
+    {build_args}
+) AS result;"#,
+            tbl_ord = tbl_ord_cte,
+            col_ord = col_ord_cte,
+            wl = wl_escaped,
+            build_args = build_args_str
+        )
     } else {
         let build_args_str = if build_args.is_empty() {
-            "'result', '{}'::jsonb".to_string()
+            "'result', '{}'::json".to_string()
         } else {
             build_args.join(",\n    ")
         };
-        format!(r#"SELECT jsonb_build_object(
+        format!(r#"SELECT json_build_object(
     {}
 ) AS result;"#, build_args_str)
     };

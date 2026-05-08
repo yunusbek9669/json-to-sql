@@ -196,7 +196,7 @@ fn test_info_endpoint() {
     
     // sql and relations are now at root level, not nested in structure
     let sql = result_json["sql"].as_str().unwrap();
-    assert!(sql.contains("WITH input_json AS"));
+    assert!(sql.contains("input_json AS"));
     assert!(sql.contains("CONCAT(name)"));
     
     // Relations are embedded as ::jsonb inside the generated SQL, not a separate field
