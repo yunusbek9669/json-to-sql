@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 struct TableMapping {
     real_name: String,
@@ -25,13 +25,15 @@ pub fn process_info_request(
     if is_relations && relations_str.is_some() {
         let rel_str = relations_str.unwrap_or("{}");
         let rel_map: IndexMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
+
+        let included_keys: Option<HashSet<String>> = table_filter
+            .as_ref()
+            .map(|filter| find_connecting_relations(filter, &rel_map));
+
         let annotated: Vec<String> = rel_map
             .iter()
-            .filter(|(key, _)| match &table_filter {
-                Some(filter) => {
-                    let (l, r) = relation_endpoints(key);
-                    filter.contains(&l) && filter.contains(&r)
-                }
+            .filter(|(key, _)| match &included_keys {
+                Some(keys) => keys.contains(*key),
                 None => true,
             })
             .map(|(key, tpl)| annotate_relation(key, tpl))
@@ -356,6 +358,70 @@ fn process_fields(val: &Value, tm: &TableMapping, mappings: &mut IndexMap<String
             }
         }
     }
+}
+
+fn find_connecting_relations(
+    filter: &[String],
+    rel_map: &IndexMap<String, String>,
+) -> HashSet<String> {
+    // Build undirected adjacency: table -> [(neighbor, relation_key)]
+    let mut adj: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for key in rel_map.keys() {
+        let (l, r) = relation_endpoints(key);
+        adj.entry(l.clone()).or_default().push((r.clone(), key.clone()));
+        adj.entry(r.clone()).or_default().push((l.clone(), key.clone()));
+    }
+
+    let mut included: HashSet<String> = HashSet::new();
+
+    // Direct relations: both endpoints in filter
+    for key in rel_map.keys() {
+        let (l, r) = relation_endpoints(key);
+        if filter.contains(&l) && filter.contains(&r) {
+            included.insert(key.clone());
+        }
+    }
+
+    // Bridge relations: BFS shortest path between each pair of filtered tables
+    for i in 0..filter.len() {
+        for j in (i + 1)..filter.len() {
+            let start = &filter[i];
+            let goal  = &filter[j];
+
+            // skip if already directly connected
+            if included.iter().any(|k| {
+                let (l, r) = relation_endpoints(k);
+                (l == *start && r == *goal) || (l == *goal && r == *start)
+            }) {
+                continue;
+            }
+
+            // BFS: (current_node, path of relation keys so far)
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+            queue.push_back((start.clone(), vec![]));
+            visited.insert(start.clone());
+
+            'bfs: while let Some((node, path)) = queue.pop_front() {
+                if node == *goal {
+                    included.extend(path);
+                    break 'bfs;
+                }
+                if let Some(neighbors) = adj.get(&node) {
+                    for (nbr, rel_key) in neighbors {
+                        if !visited.contains(nbr) {
+                            visited.insert(nbr.clone());
+                            let mut p = path.clone();
+                            p.push(rel_key.clone());
+                            queue.push_back((nbr.clone(), p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    included
 }
 
 fn parse_tables_directive(info_arr: &[Value]) -> (bool, Option<Vec<String>>) {
