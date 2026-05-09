@@ -174,6 +174,9 @@ impl SqlGenerator {
                 base_sql.push_str("\nFROM ");
                 base_sql.push_str(&self.froms.join(", "));
             }
+            for j in &filter_joins {
+                base_sql.push_str(&format!("\n{}", j));
+            }
             if !self.joins.is_empty() {
                 base_sql.push_str("\n");
                 base_sql.push_str(&self.joins.join("\n"));
