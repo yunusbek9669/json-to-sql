@@ -40,6 +40,24 @@ impl SqlGenerator {
         }
     }
 
+    /// Extracts the table alias from a JOIN string.
+    /// "INNER JOIN real_tbl AS alias ON ..." → "alias"
+    /// "INNER JOIN tbl ON ..."              → "tbl"
+    fn extract_join_alias(join_str: &str) -> Option<String> {
+        let trimmed = join_str.trim();
+        let upper = trimmed.to_uppercase();
+        let prefixes = ["INNER JOIN ", "LEFT JOIN ", "RIGHT JOIN ", "FULL JOIN ", "CROSS JOIN "];
+        let offset = prefixes.iter().find_map(|p| upper.starts_with(p).then(|| p.len()))?;
+        let rest = &trimmed[offset..];
+        let before_on = rest.split(" ON ").next()?.trim();
+        let upper_before_on = before_on.to_uppercase();
+        if let Some(pos) = upper_before_on.find(" AS ") {
+            Some(before_on[pos + 4..].trim().to_string())
+        } else {
+            Some(before_on.to_string())
+        }
+    }
+
     pub fn generate(mut self, root: QueryNode) -> Result<ParseResult, String> {
         let child_args = self.process_node(&root, None)?;
         let json_obj_expr = format!("json_build_object({})", child_args.join(", "));
@@ -49,14 +67,27 @@ impl SqlGenerator {
         base_sql.push_str("SELECT ");
         base_sql.push_str(&format!("{} AS uaq_data", json_obj_expr));
 
-        // When a list root has a LIMIT and non-LATERAL JOINs exist, LIMIT must be pushed
-        // into a subquery on the root table first. Otherwise each JOIN-multiplied row counts
-        // toward the limit — one parent with N children consumes N of the limit slots,
-        // causing the same parent row to appear N times in the result.
-        let has_regular_joins = self.joins.iter().any(|j| !j.contains("LATERAL"));
         let limit_opt  = root.source.as_ref().and_then(|s| s.limit);
         let offset_opt = root.source.as_ref().and_then(|s| s.offset);
         let order_opt  = root.source.as_ref().and_then(|s| s.order.clone());
+
+        // Split joins into two categories:
+        // - filter_joins (INNER JOIN): reduce rows — must be inside the root subquery so
+        //   LIMIT applies after filtering, not before. After the subquery they are re-joined
+        //   in the outer query so their columns remain accessible to the SELECT list.
+        // - enrich_joins (LEFT/FULL/RIGHT + LATERAL): can multiply or add rows — stay in
+        //   the outer query; DISTINCT ON collapses any multiplied rows back to one per root.
+        let all_joins = std::mem::take(&mut self.joins);
+        let (filter_joins, enrich_joins): (Vec<String>, Vec<String>) = all_joins
+            .into_iter()
+            .partition(|j| {
+                let u = j.trim().to_uppercase();
+                !u.contains("LATERAL") && u.starts_with("INNER JOIN")
+            });
+        self.joins = enrich_joins;
+
+        let has_regular_joins = self.joins.iter().any(|j| !j.contains("LATERAL"))
+            || !filter_joins.is_empty();
         let use_root_subquery = root.is_list
             && has_regular_joins
             && limit_opt.is_some()
@@ -66,21 +97,35 @@ impl SqlGenerator {
             let root_alias = root.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or("");
             let root_prefix = format!("{}.", root_alias);
 
-            // Conditions that reference the root table go into the subquery so the LIMIT
-            // is applied after filtering but before joining. Conditions that reference
-            // joined tables stay in the outer WHERE.
-            let (root_wheres, join_wheres): (Vec<String>, Vec<String>) =
-                std::mem::take(&mut self.wheres)
-                    .into_iter()
-                    .partition(|w| w.starts_with(&root_prefix));
+            // Aliases of tables brought in by INNER JOINs — their WHERE conditions must
+            // also move into the subquery so filtering happens before LIMIT.
+            let filter_aliases: Vec<String> = filter_joins.iter()
+                .filter_map(|j| Self::extract_join_alias(j))
+                .collect();
 
-            // ROW_NUMBER() assigns a unique integer to every root row before the LIMIT.
-            // After the LIMIT the numbers are 1..N (one per distinct root entity).
-            // The outer DISTINCT ON then collapses the JOIN-multiplied rows back to one
-            // per root entity — whichever join row PostgreSQL returns first is kept.
-            let mut root_sub = format!("SELECT *, ROW_NUMBER() OVER () AS _uaq_rn FROM {}", self.froms[0]);
-            if !root_wheres.is_empty() {
-                root_sub.push_str(&format!("\n    WHERE {}", root_wheres.join(" AND ")));
+            // Route WHERE conditions:
+            //   root-table columns + INNER-JOIN-table columns  → subquery WHERE
+            //   everything else (LEFT JOIN tables)             → outer WHERE
+            let all_wheres = std::mem::take(&mut self.wheres);
+            let (subq_wheres, outer_wheres): (Vec<String>, Vec<String>) =
+                all_wheres.into_iter().partition(|w| {
+                    w.starts_with(&root_prefix)
+                        || filter_aliases.iter().any(|a| w.starts_with(&format!("{}.", a)))
+                });
+
+            // Root subquery: root table + INNER JOINs + their conditions + LIMIT.
+            // Selecting only root_alias.* avoids column-name ambiguity when both tables
+            // share column names such as "id" or "status".
+            let mut root_sub = format!(
+                "SELECT {alias}.*, ROW_NUMBER() OVER () AS _uaq_rn FROM {from}",
+                alias = root_alias,
+                from  = self.froms[0]
+            );
+            for j in &filter_joins {
+                root_sub.push_str(&format!("\n    {}", j));
+            }
+            if !subq_wheres.is_empty() {
+                root_sub.push_str(&format!("\n    WHERE {}", subq_wheres.join(" AND ")));
             }
             if let Some(order) = &order_opt {
                 if self.guard.is_safe_order_by(order).is_ok() {
@@ -94,23 +139,36 @@ impl SqlGenerator {
                 root_sub.push_str(&format!("\n    OFFSET {}", offset));
             }
 
-            // Rewrite the SELECT to use DISTINCT ON so one row is kept per root entity.
-            // DISTINCT ON requires ORDER BY to begin with the same expression.
-            base_sql = format!(
-                "SELECT DISTINCT ON ({alias}._uaq_rn) {expr} AS uaq_data",
-                alias = root_alias,
-                expr = json_obj_expr
-            );
+            // DISTINCT ON is only needed when enriching (LEFT/FULL) joins can multiply rows.
+            let has_enrich_regular = self.joins.iter().any(|j| !j.contains("LATERAL"));
+            if has_enrich_regular {
+                base_sql = format!(
+                    "SELECT DISTINCT ON ({alias}._uaq_rn) {expr} AS uaq_data",
+                    alias = root_alias,
+                    expr  = json_obj_expr
+                );
+            } else {
+                base_sql = format!("SELECT {} AS uaq_data", json_obj_expr);
+            }
             base_sql.push_str(&format!("\nFROM (\n  {}\n) AS {}", root_sub, root_alias));
+
+            // Re-join INNER JOIN tables in the outer query so their columns are accessible
+            // to the SELECT list. These re-joins are 1-to-1 (same FK, subquery already
+            // guarantees exactly one matching row per root row), so no row multiplication.
+            for j in &filter_joins {
+                base_sql.push_str(&format!("\n{}", j));
+            }
             if !self.joins.is_empty() {
                 base_sql.push_str("\n");
                 base_sql.push_str(&self.joins.join("\n"));
             }
-            if !join_wheres.is_empty() {
+            if !outer_wheres.is_empty() {
                 base_sql.push_str("\nWHERE ");
-                base_sql.push_str(&join_wheres.join(" AND "));
+                base_sql.push_str(&outer_wheres.join(" AND "));
             }
-            base_sql.push_str(&format!("\nORDER BY {}._uaq_rn", root_alias));
+            if has_enrich_regular {
+                base_sql.push_str(&format!("\nORDER BY {}._uaq_rn", root_alias));
+            }
         } else {
             if !self.froms.is_empty() {
                 base_sql.push_str("\nFROM ");

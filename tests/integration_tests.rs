@@ -629,3 +629,87 @@ fn test_operation_threat_in_value() {
     let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
     assert_eq!(v["isOk"], false, "Should fail on SQL injection attempt");
 }
+
+#[test]
+fn test_inner_join_limit_in_subquery() {
+    // Bug: when the root has $limit AND a child uses INNER JOIN, the engine previously
+    // applied LIMIT to the root table BEFORE the INNER JOIN filter, causing fewer results
+    // than requested (e.g. $limit:10 → only 4 results because 6 were filtered by INNER JOIN).
+    //
+    // Fix: INNER JOINs are included inside the root subquery so LIMIT applies AFTER
+    // filtering. They are then re-joined in the outer query for column access.
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "roe[orgId: 2, $limit: 10]",
+            "employee": {
+                "@source": "employee",
+                "@flatten": true,
+                "@fields": {
+                    "id": "id",
+                    "lastName": "last_name"
+                }
+            },
+            "dept": {
+                "@source": "department",
+                "@flatten": true,
+                "@fields": { "deptName": "name" }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("relation_organization_employee:roe".to_string(),
+        json!({"orgId": "organization_id", "employee_id": "employee_id", "status": "status"}));
+    wl.insert("employee".to_string(), json!(["id", "last_name"]));
+    wl.insert("department".to_string(), json!(["id", "name", "employee_id"]));
+
+    let mut rels = std::collections::HashMap::new();
+    // INNER JOIN: roe -><- employee (filtering join — must be inside subquery)
+    rels.insert(
+        "roe-><-employee".to_string(),
+        "@join @table ON @2.id = @1.employee_id".to_string(),
+    );
+    // LEFT JOIN: roe -> department (enriching join — stays in outer query)
+    rels.insert(
+        "roe->department".to_string(),
+        "@join @table ON @2.employee_id = @1.employee_id".to_string(),
+    );
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let result = generator::SqlGenerator::new(Some(wl), Some(rels))
+        .generate(root)
+        .expect("should generate SQL");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("INNER JOIN limit SQL:\n{}", sql);
+
+    // INNER JOIN must appear INSIDE the root subquery so LIMIT applies after filtering
+    let subquery_start = sql.find("ROW_NUMBER() OVER () AS _uaq_rn").expect("subquery must exist");
+    let limit_pos = sql.find("LIMIT 10").expect("LIMIT must be present");
+    let inner_join_pos = sql.find("INNER JOIN").expect("INNER JOIN must be present");
+    assert!(
+        inner_join_pos < limit_pos,
+        "INNER JOIN must appear before LIMIT (inside subquery)"
+    );
+    assert!(
+        inner_join_pos > subquery_start - 200,
+        "INNER JOIN must be close to ROW_NUMBER (inside subquery body)"
+    );
+
+    // LEFT JOIN (department) must stay in the outer query — after the subquery closing paren
+    let subquery_end = sql.rfind(") AS roe").expect("subquery must close with alias");
+    let left_join_pos = sql.find("LEFT JOIN department").expect("LEFT JOIN must exist");
+    assert!(
+        left_join_pos > subquery_end,
+        "LEFT JOIN must be in the outer query, not inside the subquery"
+    );
+
+    // DISTINCT ON must be present (because of the LEFT JOIN that can multiply rows)
+    assert!(sql.contains("DISTINCT ON (roe._uaq_rn)"), "DISTINCT ON required for LEFT JOINs");
+
+    // employee columns must be accessible in the outer SELECT
+    assert!(sql.contains("employee.last_name"), "employee columns must be reachable in outer query");
+
+    // params: orgId filter
+    assert!(result.params.as_ref().unwrap().contains_key("p1"), "filter param must exist");
+}
