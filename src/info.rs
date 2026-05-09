@@ -14,7 +14,7 @@ pub fn process_info_request(
     relations_str: Option<&str>,
     macros_str: Option<&str>,
 ) -> Value {
-    let is_tables = info_arr.iter().any(|v| v.as_str() == Some("@tables"));
+    let (is_tables, table_filter) = parse_tables_directive(info_arr);
     let is_relations = info_arr.iter().any(|v| v.as_str() == Some("@relations"));
     
     let mut info_result = serde_json::Map::new();
@@ -25,8 +25,18 @@ pub fn process_info_request(
     if is_relations && relations_str.is_some() {
         let rel_str = relations_str.unwrap_or("{}");
         let rel_map: IndexMap<String, String> = serde_json::from_str(rel_str).unwrap_or_default();
-        let keys: Vec<String> = rel_map.keys().cloned().collect();
-        included_relations = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+        let annotated: Vec<String> = rel_map
+            .iter()
+            .filter(|(key, _)| match &table_filter {
+                Some(filter) => {
+                    let (l, r) = relation_endpoints(key);
+                    filter.contains(&l) && filter.contains(&r)
+                }
+                None => true,
+            })
+            .map(|(key, tpl)| annotate_relation(key, tpl))
+            .collect();
+        included_relations = serde_json::to_string(&annotated).unwrap_or_else(|_| "[]".to_string());
     }
 
     let mut build_args = vec![];
@@ -128,6 +138,14 @@ pub fn process_info_request(
                 alias.to_string()
             };
             resolved_wl.insert(display_key, json!(final_mappings));
+        }
+
+        // Filter tables if @tables[t1, t2, ...] specified
+        if let Some(filter) = &table_filter {
+            resolved_wl.retain(|k, _| {
+                let clean = k.trim_end_matches("(virtual)").trim();
+                filter.contains(&clean.to_string())
+            });
         }
 
         // Build position tracking for whitelist-order preservation
@@ -338,6 +356,107 @@ fn process_fields(val: &Value, tm: &TableMapping, mappings: &mut IndexMap<String
             }
         }
     }
+}
+
+fn parse_tables_directive(info_arr: &[Value]) -> (bool, Option<Vec<String>>) {
+    for v in info_arr {
+        if let Some(s) = v.as_str() {
+            if s == "@tables" {
+                return (true, None);
+            }
+            if s.starts_with("@tables[") && s.ends_with(']') {
+                let inner = s["@tables[".len()..s.len() - 1].trim();
+                if inner == "*" {
+                    return (true, None);
+                }
+                let names = inner
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                return (true, Some(names));
+            }
+        }
+    }
+    (false, None)
+}
+
+fn relation_endpoints(key: &str) -> (String, String) {
+    let (left, right) = if let Some(pos) = key.find("-><-") {
+        (&key[..pos], &key[pos + 4..])
+    } else if let Some(pos) = key.find("<->") {
+        (&key[..pos], &key[pos + 3..])
+    } else if let Some(pos) = key.find("<-") {
+        (&key[..pos], &key[pos + 2..])
+    } else if let Some(pos) = key.find("->") {
+        (&key[..pos], &key[pos + 2..])
+    } else {
+        (key, "")
+    };
+    // Strip :node_name suffix from right side (e.g. "organization:parent_organization" → "organization")
+    let right_table = right.split(':').next().unwrap_or(right).to_string();
+    (left.to_string(), right_table)
+}
+
+fn annotate_relation(key: &str, template: &str) -> String {
+    // Split key into left, operator, right
+    let (left, op, right) = if let Some(pos) = key.find("-><-") {
+        (&key[..pos], "-><-", &key[pos + 4..])
+    } else if let Some(pos) = key.find("<->") {
+        (&key[..pos], "<->", &key[pos + 3..])
+    } else if let Some(pos) = key.find("<-") {
+        (&key[..pos], "<-", &key[pos + 2..])
+    } else if let Some(pos) = key.find("->") {
+        (&key[..pos], "->", &key[pos + 2..])
+    } else {
+        return key.to_string();
+    };
+
+    // Extract first condition after ON
+    let on_cond = template
+        .to_uppercase()
+        .find(" ON ")
+        .map(|i| template[i + 4..].trim().to_string())
+        .unwrap_or_default();
+    let first_cond = on_cond.split(" AND ").next().unwrap_or("").trim().to_string();
+
+    // Parse @N.col from both sides of =
+    let eq_parts: Vec<&str> = first_cond.splitn(2, '=').collect();
+    if eq_parts.len() < 2 {
+        return key.to_string();
+    }
+
+    let lhs = eq_parts[0].trim();
+    let rhs = eq_parts[1].trim().split_whitespace().next().unwrap_or("");
+
+    fn ref_col(s: &str) -> Option<(&str, &str)> {
+        let s = s.trim_start_matches('(').trim_end_matches(')');
+        let dot = s.find('.')?;
+        let r = &s[..dot];
+        let c = &s[dot + 1..];
+        if r == "@1" || r == "@2" { Some((r, c)) } else { None }
+    }
+
+    fn cardinality(col: &str) -> &'static str {
+        let c = col.to_lowercase();
+        if c == "id" { "one" } else { "many" }
+    }
+
+    let (left_card, right_card) = match (ref_col(lhs), ref_col(rhs)) {
+        (Some((lr, lc)), Some((_rr, rc))) => {
+            let lc_card = cardinality(lc);
+            let rc_card = cardinality(rc);
+            // @1 maps to left table, @2 maps to right table
+            if lr == "@1" {
+                (lc_card, rc_card)
+            } else {
+                (rc_card, lc_card)
+            }
+        }
+        _ => return key.to_string(),
+    };
+
+    format!("{}({}){}{}({})", left, left_card, op, right, right_card)
 }
 
 fn collect_macro_fields(
