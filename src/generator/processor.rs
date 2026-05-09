@@ -316,7 +316,22 @@ impl SqlGenerator {
         self.froms = old_froms;
         self.joined_aliases = old_aliases;
 
-        let json_obj = format!("json_build_object({})", inner_args.join(", "));
+        // @mode: "values" — emit a flat scalar array (json_agg of the raw value)
+        // instead of json_agg of objects. Only applies when there is exactly one field
+        // and no children; falls back to json_build_object otherwise.
+        let json_obj = if node.mode.as_deref() == Some("values")
+            && inner_args.len() == 1
+            && node.children.is_empty()
+        {
+            // inner_args[0] is "'key', value_expr" — extract just the value part
+            inner_args[0]
+                .splitn(2, "', ")
+                .nth(1)
+                .unwrap_or(inner_args[0].as_str())
+                .to_string()
+        } else {
+            format!("json_build_object({})", inner_args.join(", "))
+        };
         let mut where_parts = vec![join_condition];
         for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?); }
         where_parts.extend(inner_wheres);

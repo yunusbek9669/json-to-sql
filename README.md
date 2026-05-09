@@ -744,6 +744,52 @@ Flattensiz: { ..., "degree": { "degree_name": "Mayor", "degree_date": "2020-01-0
 Flattenli:  { ..., "degree_name": "Mayor", "degree_date": "2020-01-01" }
 ```
 
+#### 4.4. `@mode: "values"` — Skalyar Massiv
+
+Odatda `[]` bilan tugan list node **obyektlar massivini** qaytaradi: `[{"item_name": "control"}]`.  
+`@mode: "values"` esa bitta maydon uchun **sof qiymatlar massivini** qaytaradi: `["control"]`.
+
+**Shartlar:**
+- Faqat bitta `@fields` maydoni bo'lishi kerak
+- Child node bo'lmasligi kerak
+
+```json
+{
+  "@data": {
+    "@source": "adminUser[username: special-admin]",
+    "@fields": { "id": "id", "username": "username" },
+
+    "role[]": {
+      "@source": "authAssignment",
+      "@mode": "values",
+      "@fields": ["item_name"]
+    },
+    "permissions[]": {
+      "@source": "authItemChild",
+      "@mode": "values",
+      "@fields": ["child"]
+    }
+  }
+}
+```
+
+Natija:
+```json
+{
+  "id": -9999998,
+  "username": "special-admin",
+  "role":        ["control"],
+  "permissions": ["organization/index", "employee-command-archive/ministry-..."]
+}
+```
+
+| `@mode`    | `@fields`                    | Natija                              |
+|------------|------------------------------|-------------------------------------|
+| (yo'q)     | `["item_name"]`              | `[{"item_name": "control"}]`        |
+| `"values"` | `["item_name"]`              | `["control"]`                       |
+| `"values"` | `{"name": "item_name"}`      | `["control"]` (kalit e'tiborga olinmaydi) |
+| `"values"` | 2+ maydon yoki child bor     | Fallback: `[{"key": val, ...}]`     |
+
 ---
 
 ### 5. Maxsus Maydon Funksiyalari
