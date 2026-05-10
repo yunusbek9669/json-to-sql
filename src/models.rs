@@ -45,6 +45,8 @@ pub struct ParseResult {
     pub sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<String>,
+    #[serde(rename = "totalParams", skip_serializing_if = "Option::is_none")]
+    pub total_params: Option<IndexMap<String, Value>>,
     pub params: Option<IndexMap<String, Value>>,
     pub message: String,
 }

@@ -250,9 +250,9 @@ impl SqlGenerator {
         }
 
         // Build total COUNT SQL for list queries (same filters, no LIMIT/OFFSET)
-        let total_sql: Option<String> = if root.is_list {
-            root.source.as_ref().and_then(|source| {
-                self.guard.resolve_alias(&source.table_name).ok().map(|root_real| {
+        let (total_sql, total_params) = if root.is_list {
+            if let Some(source) = &root.source {
+                if let Ok(root_real) = self.guard.resolve_alias(&source.table_name) {
                     let root_alias = &source.table_name;
                     let mut count_sql = format!("SELECT COUNT(*) FROM {} AS {}", root_real, root_alias);
                     for j in &filter_joins {
@@ -261,17 +261,30 @@ impl SqlGenerator {
                     if !total_count_wheres.is_empty() {
                         count_sql.push_str(&format!("\nWHERE {}", total_count_wheres.join(" AND ")));
                     }
-                    count_sql
-                })
-            })
+                    // Only include params that are actually referenced in the total SQL.
+                    // The main params map may contain extra params from child nodes
+                    // (e.g. default filters on joined tables) that are absent from the
+                    // total SQL — binding them would cause PDO HY093.
+                    let referenced: IndexMap<String, Value> = self.params.iter()
+                        .filter(|(key, _)| count_sql.contains(&format!(":{}", key)))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    (Some(count_sql), Some(referenced))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
         } else {
-            None
+            (None, None)
         };
 
         Ok(ParseResult {
             is_ok: true,
             sql: Some(final_sql),
             total: total_sql,
+            total_params,
             params: Some(self.params),
             message: "success".to_string(),
         })

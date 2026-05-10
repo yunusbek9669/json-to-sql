@@ -866,6 +866,84 @@ fn test_total_count_sql() {
     // The filter param must exist
     assert!(params.values().any(|v| v.as_str() == Some("1")), "filter param must be in params");
 
+    // total_params must only contain params referenced in total SQL
+    let total_params = result.total_params.as_ref().expect("total_params must be present");
+    println!("Total params: {:?}", total_params);
+    for key in total_params.keys() {
+        assert!(total.contains(&format!(":{}", key)), "total_params key '{}' must appear in total SQL", key);
+    }
+
+    // Test with a child that adds extra params (e.g. default filter on joined table).
+    // total_params must NOT include child params — only root-level ones.
+    let json_with_child = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 5]",
+            "@fields": { "id": "id" },
+            "org": {
+                "@source": "org[type: 2]",
+                "@fields": { "name": "name" }
+            }
+        }
+    }"#;
+    let mut wl_child = indexmap::IndexMap::new();
+    wl_child.insert("employee:emp".to_string(), json!(["id", "status"]));
+    wl_child.insert("organization:org".to_string(), json!(["name", "type"]));
+    let mut rels_child = std::collections::HashMap::new();
+    rels_child.insert("emp->org".to_string(), "LEFT JOIN @table ON @1.org_id = @2.id".to_string());
+    let root_child = parser::parse_json(json_with_child, None).unwrap();
+    let result_child = generator::SqlGenerator::new(Some(wl_child), Some(rels_child))
+        .generate(root_child).expect("should work");
+    let total_child = result_child.total.as_ref().unwrap();
+    let total_params_child = result_child.total_params.as_ref().unwrap();
+    let all_params_child = result_child.params.as_ref().unwrap();
+    println!("Child test total SQL: {}", total_child);
+    println!("Child test total_params: {:?}", total_params_child);
+    println!("Child test all params: {:?}", all_params_child);
+    // main params has p1 (status:1) and p2 (type:2); total only references p1
+    assert!(all_params_child.len() >= 2, "main params must include child filter param");
+    for key in total_params_child.keys() {
+        assert!(total_child.contains(&format!(":{}", key)),
+            "total_params key '{}' must appear in total SQL", key);
+    }
+    // Child's filter param must NOT be in total_params
+    for key in all_params_child.keys() {
+        if !total_child.contains(&format!(":{}", key)) {
+            assert!(!total_params_child.contains_key(key),
+                "param '{}' is not in total SQL but appears in total_params", key);
+        }
+    }
+
+    // INNER JOIN child filter MUST appear in total (it reduces root count)
+    let json_inner = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 5]",
+            "@fields": { "id": "id" },
+            "org": {
+                "@source": "org[type: 2, $join: inner]",
+                "@fields": { "name": "name" }
+            }
+        }
+    }"#;
+    let mut wl_inner = indexmap::IndexMap::new();
+    wl_inner.insert("employee:emp".to_string(), json!(["id", "status"]));
+    wl_inner.insert("organization:org".to_string(), json!(["name", "type"]));
+    let mut rels_inner = std::collections::HashMap::new();
+    rels_inner.insert("emp->org".to_string(), "LEFT JOIN @table ON @1.org_id = @2.id".to_string());
+    let root_inner = parser::parse_json(json_inner, None).unwrap();
+    let result_inner = generator::SqlGenerator::new(Some(wl_inner), Some(rels_inner))
+        .generate(root_inner).expect("inner join total");
+    let total_inner = result_inner.total.as_ref().unwrap();
+    let tparams_inner = result_inner.total_params.as_ref().unwrap();
+    let all_inner = result_inner.params.as_ref().unwrap();
+    println!("INNER JOIN total SQL: {}", total_inner);
+    println!("INNER JOIN totalParams: {:?}", tparams_inner);
+    println!("INNER JOIN all params: {:?}", all_inner);
+    // total must contain INNER JOIN and org condition
+    assert!(total_inner.contains("INNER JOIN"), "INNER JOIN must be in total");
+    assert!(total_inner.contains("org.type = :p"), "INNER JOIN child filter must be in total");
+    // totalParams must include BOTH p1 (root) and p2 (inner child)
+    assert!(tparams_inner.len() == 2, "totalParams must have both root and inner-child params, got: {:?}", tparams_inner);
+
     // Single object query (@data, not @data[]) must NOT have total
     let json_single = r#"{"@data": {"@source": "emp", "@fields": {"id": "id"}}}"#;
     let root2 = parser::parse_json(json_single, None).unwrap();
@@ -875,4 +953,5 @@ fn test_total_count_sql() {
         .generate(root2)
         .expect("should generate SQL");
     assert!(result2.total.is_none(), "non-list query must not have total");
+    assert!(result2.total_params.is_none(), "non-list query must not have total_params");
 }
