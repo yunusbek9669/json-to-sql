@@ -179,7 +179,7 @@ fn test_auto_path_resolution() {
 
 #[test]
 fn test_info_endpoint() {
-    let json_input = "{\"@info\": [\"@tables\", \"@relations\"]}\0".as_ptr() as *const c_char;
+    let json_input = "{\"@info\": [\"@tables[*]\", \"@relations\"]}\0".as_ptr() as *const c_char;
     let whitelist_input = "{\"employee:emp\": {\"unique\": \"id\", \"full_name\": \"CONCAT(name)\"}, \"org\": [\"*\"]}\0".as_ptr() as *const c_char;
     let relations_input = "{\"emp->org\": \"JOIN\", \"org->dept\": \"JOIN\"}\0".as_ptr() as *const c_char;
 
@@ -204,6 +204,58 @@ fn test_info_endpoint() {
     assert!(sql.contains("org->dept"));
     
     uaq_free_string(result_ptr);
+}
+
+#[test]
+fn test_info_tables_empty_brackets_error() {
+    // @tables (bare) and @tables[] (empty) must both return isOk=false
+    let json_input = "{\"@info\": [\"@tables[]\"]}\0".as_ptr() as *const c_char;
+    let whitelist_input = "{\"employee:emp\": [\"id\"]}\0".as_ptr() as *const c_char;
+
+    let result_ptr = uaq_parse(json_input, whitelist_input, std::ptr::null(), std::ptr::null());
+    assert!(!result_ptr.is_null());
+
+    let result_str = unsafe { CStr::from_ptr(result_ptr).to_str().unwrap().to_string() };
+    uaq_free_string(result_ptr);
+
+    let v: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+    assert_eq!(v["isOk"], false, "Empty @tables[] must return error: {}", result_str);
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(!msg.is_empty(), "Error message must not be empty");
+    println!("Empty brackets error: {}", msg);
+
+    // @tables (bare, no brackets) must also return an error
+    let json_bare = "{\"@info\": [\"@tables\"]}\0".as_ptr() as *const c_char;
+    let wl = "{\"employee:emp\": [\"id\"]}\0".as_ptr() as *const c_char;
+    let ptr2 = uaq_parse(json_bare, wl, std::ptr::null(), std::ptr::null());
+    let s2 = unsafe { CStr::from_ptr(ptr2).to_str().unwrap().to_string() };
+    uaq_free_string(ptr2);
+    let v2: serde_json::Value = serde_json::from_str(&s2).unwrap();
+    assert_eq!(v2["isOk"], false, "Bare @tables must also return error: {}", s2);
+}
+
+#[test]
+fn test_info_tables_prefix_filter() {
+    // @tables[employee~] should return all whitelist aliases that start with "employee"
+    let whitelist_str = r#"{
+        "manuals_employee_action_type:employeeActionType": {"id": "id", "name": "name_lt"},
+        "manuals_employee_status:employeeStatus":          {"id": "id", "label": "label"},
+        "personal_info:personal":                          ["id", "full_name"]
+    }"#;
+
+    let info_arr = serde_json::json!(["@tables[employee~]"]);
+    let arr = info_arr.as_array().unwrap();
+    let result = json_to_sql::info::process_info_request(arr, Some(whitelist_str), None, None);
+
+    assert_eq!(result["isOk"], true, "prefix filter must succeed: {:?}", result);
+    let sql = result["sql"].as_str().unwrap_or("");
+    println!("Prefix filter SQL:\n{}", sql);
+
+    // Both "employee" aliases must appear in the generated SQL
+    assert!(sql.contains("employeeActionType"), "employeeActionType must be included");
+    assert!(sql.contains("employeeStatus"),     "employeeStatus must be included");
+    // "personal" must NOT appear (doesn't start with "employee")
+    assert!(!sql.contains("personal"),          "personal must be excluded");
 }
 
 #[test]
@@ -712,4 +764,115 @@ fn test_inner_join_limit_in_subquery() {
 
     // params: orgId filter
     assert!(result.params.as_ref().unwrap().contains_key("p1"), "filter param must exist");
+}
+
+#[test]
+fn test_whitelist_default_filter() {
+    // "manuals_employee_action_type:employeeActionType[status:1]"
+    // The "[status:1]" part means: always inject WHERE employeeActionType.status = :p1
+    // "status" does NOT need to be in the allowed columns list.
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "employeeActionType",
+            "@fields": { "id": "id", "name": "name" }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert(
+        "manuals_employee_action_type:employeeActionType[status:1]".to_string(),
+        json!({"id": "id", "name": "name_lt"}),
+    );
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let result = generator::SqlGenerator::new(Some(wl.clone()), None)
+        .generate(root)
+        .expect("should generate SQL");
+
+    let sql = result.sql.as_ref().unwrap();
+    let params = result.params.as_ref().unwrap();
+    println!("Default filter SQL:\n{}", sql);
+
+    // Default filter must appear as WHERE condition
+    assert!(sql.contains("employeeActionType.status = :p"), "default filter must be in WHERE");
+    // The param value must be "1" (the backend-defined value)
+    let status_param = params.values().find(|v| v.as_str() == Some("1"));
+    assert!(status_param.is_some(), "filter value '1' must be in params");
+
+    // Now test with list child (lateral subquery path)
+    let json_lateral = r#"{
+        "@data[]": {
+            "@source": "emp[$limit: 5]",
+            "@fields": { "id": "id" },
+            "actionTypes[]": {
+                "@source": "employeeActionType",
+                "@fields": { "id": "id", "name": "name" }
+            }
+        }
+    }"#;
+
+    let mut wl2 = indexmap::IndexMap::new();
+    wl2.insert("employee:emp".to_string(), json!(["id"]));
+    wl2.insert(
+        "manuals_employee_action_type:employeeActionType[status:1]".to_string(),
+        json!({"id": "id", "name": "name_lt"}),
+    );
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert(
+        "emp->employeeActionType".to_string(),
+        "LEFT JOIN @table ON @1.id = @2.employee_id".to_string(),
+    );
+
+    let root2 = parser::parse_json(json_lateral, None).unwrap();
+    let result2 = generator::SqlGenerator::new(Some(wl2), Some(rels))
+        .generate(root2)
+        .expect("lateral with default filter should work");
+
+    let sql2 = result2.sql.as_ref().unwrap();
+    println!("Lateral default filter SQL:\n{}", sql2);
+    assert!(sql2.contains("LEFT JOIN LATERAL"), "must use LATERAL for list child");
+    assert!(sql2.contains("employeeActionType.status = :p"), "default filter must be inside lateral WHERE");
+}
+
+#[test]
+fn test_total_count_sql() {
+    // Simple list: total must be SELECT COUNT(*) FROM table WHERE <root filters>
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[status: 1, $limit: 10]",
+            "@fields": { "id": "id", "name": "full_name" }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee:emp".to_string(), json!(["id", "full_name", "status"]));
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let result = generator::SqlGenerator::new(Some(wl), None)
+        .generate(root)
+        .expect("should generate SQL");
+
+    let total = result.total.as_ref().expect("total must be present for list query");
+    let params = result.params.as_ref().unwrap();
+    println!("Total SQL: {}", total);
+
+    assert!(total.starts_with("SELECT COUNT(*)"), "total must be a COUNT query");
+    assert!(total.contains("employee AS emp"),    "total must reference root table");
+    assert!(total.contains("emp.status = :p"),    "total must include root filters");
+    // $limit must NOT appear in total
+    assert!(!total.contains("LIMIT"),  "total must not include LIMIT");
+    assert!(!total.contains("OFFSET"), "total must not include OFFSET");
+    // The filter param must exist
+    assert!(params.values().any(|v| v.as_str() == Some("1")), "filter param must be in params");
+
+    // Single object query (@data, not @data[]) must NOT have total
+    let json_single = r#"{"@data": {"@source": "emp", "@fields": {"id": "id"}}}"#;
+    let root2 = parser::parse_json(json_single, None).unwrap();
+    let mut wl2 = indexmap::IndexMap::new();
+    wl2.insert("employee:emp".to_string(), json!(["id"]));
+    let result2 = generator::SqlGenerator::new(Some(wl2), None)
+        .generate(root2)
+        .expect("should generate SQL");
+    assert!(result2.total.is_none(), "non-list query must not have total");
 }

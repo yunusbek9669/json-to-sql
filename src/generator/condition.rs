@@ -61,6 +61,53 @@ impl SqlGenerator {
         }
     }
 
+    /// Builds a WHERE condition for a backend-defined default filter.
+    /// Skips whitelist column validation since this is a trusted backend condition.
+    pub(crate) fn build_trusted_condition(&mut self, table_alias: &str, filter: &crate::models::FilterRule) -> Result<String, String> {
+        let column_ref = crate::guard::Guard::auto_prefix_field(&filter.field, table_alias, None);
+        match filter.operator.as_str() {
+            "eq" => {
+                let p = self.next_param(Value::String(filter.value.clone()));
+                Ok(format!("{} = {}", column_ref, p))
+            }
+            "neq" => {
+                let p = self.next_param(Value::String(filter.value.clone()));
+                Ok(format!("{} != {}", column_ref, p))
+            }
+            "gt" => {
+                let p = self.next_param_numeric_or_string(&filter.value);
+                Ok(format!("{} > {}", column_ref, p))
+            }
+            "lt" => {
+                let p = self.next_param_numeric_or_string(&filter.value);
+                Ok(format!("{} < {}", column_ref, p))
+            }
+            "like" => {
+                let p = self.next_param(Value::String(filter.value.clone()));
+                Ok(format!("{} LIKE {}", column_ref, p))
+            }
+            "in" => {
+                let val = filter.value.trim_matches(|c| c == '(' || c == ')');
+                let parts: Vec<&str> = val.split(',').collect();
+                let mut param_names = Vec::new();
+                for part in parts {
+                    param_names.push(self.next_param_numeric_or_string(part.trim()));
+                }
+                Ok(format!("{} IN ({})", column_ref, param_names.join(", ")))
+            }
+            "between" => {
+                if let Some((start, end)) = filter.value.split_once("..") {
+                    let p1 = self.next_param_numeric_or_string(start.trim());
+                    let p2 = self.next_param_numeric_or_string(end.trim());
+                    Ok(format!("{} BETWEEN {} AND {}", column_ref, p1, p2))
+                } else {
+                    Err(format!("Invalid between syntax: {}", filter.value))
+                }
+            }
+            _ => Err(format!("Unsupported operator: {}", filter.operator))
+        }
+    }
+
     pub(crate) fn next_param_numeric_or_string(&mut self, val: &str) -> String {
         if let Ok(n) = val.parse::<f64>() {
             self.next_param(json!(n))

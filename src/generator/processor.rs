@@ -29,10 +29,14 @@ impl SqlGenerator {
             // and there are no source-level filters — the subqueries carry their own
             // correlation condition, so a JOIN in the main query is unnecessary and
             // would multiply rows (one per related record) causing duplicate results.
+            // If the table has backend-defined default filters, skip_join is disabled
+            // because those filters must be applied as WHERE conditions.
+            let has_default_filters = !self.guard.get_default_filters(&current_alias).is_empty();
             let skip_join = context.is_some()
                 && !node.is_list
                 && node.children.is_empty()
                 && source.filters.is_empty()
+                && !has_default_filters
                 && self.all_fields_local_agg_check(&node.fields);
 
             if context.is_none() {
@@ -62,6 +66,10 @@ impl SqlGenerator {
             if (context.is_none() || !node.is_list) && !skip_join {
                 for filter in &source.filters {
                     let condition = self.build_condition(&current_alias, filter, Some(&node.fields))?;
+                    self.wheres.push(condition);
+                }
+                for filter in self.guard.get_default_filters(&current_alias).to_vec() {
+                    let condition = self.build_trusted_condition(&current_alias, &filter)?;
                     self.wheres.push(condition);
                 }
             }
@@ -334,6 +342,9 @@ impl SqlGenerator {
         };
         let mut where_parts = vec![join_condition];
         for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?); }
+        for filter in self.guard.get_default_filters(child_alias).to_vec() {
+            where_parts.push(self.build_trusted_condition(child_alias, &filter)?);
+        }
         where_parts.extend(inner_wheres);
         
         let mut inner_sql = format!("SELECT {} AS item\n    FROM {} AS {}", json_obj, real_table, child_alias);

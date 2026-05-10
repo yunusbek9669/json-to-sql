@@ -82,6 +82,33 @@ impl SqlGenerator {
             }
         }
 
+        // Reverse fallback for -> and <-: if A->B defined, allow querying B->A
+        // by swapping @1/@2 in the template so the ON condition stays correct.
+        for sym in &["->", "<-"] {
+            let key_rev  = format!("{}{}{}", child_alias, sym, parent_alias);
+            let spec_rev = format!("{}{}{}:{}", child_alias, sym, parent_alias, node_name);
+
+            for lookup in &[spec_rev.as_str(), key_rev.as_str()] {
+                if let Some(r) = self.relations.get(*lookup) {
+                    let table_expr = if child_real == child_alias {
+                        child_real.to_string()
+                    } else {
+                        format!("{} AS {}", child_real, child_alias)
+                    };
+                    // @1 in the stored template = left side of the stored key = child_alias here
+                    // @2 in the stored template = right side                  = parent_alias here
+                    let resolved = r
+                        .replace("@join", "LEFT JOIN")
+                        .replace("@table", &table_expr)
+                        .replace("@1", "\x00_1_\x00")
+                        .replace("@2", "\x00_2_\x00")
+                        .replace("\x00_1_\x00", child_alias)
+                        .replace("\x00_2_\x00", parent_alias);
+                    return Ok(Some(resolved));
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -99,11 +126,8 @@ impl SqlGenerator {
 
                     if !left.is_empty() && !right.is_empty() {
                         graph.entry(left.to_string()).or_default().push(right.to_string());
-                        // Bi-directional symbols
-                        if *sym == "<->" || *sym == "-><-" {
-                            graph.entry(right.to_string()).or_default().push(left.to_string());
-                        }
-                        break; // Found the primary symbol
+                        graph.entry(right.to_string()).or_default().push(left.to_string());
+                        break;
                     }
                 }
             }

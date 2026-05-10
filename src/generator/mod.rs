@@ -86,6 +86,12 @@ impl SqlGenerator {
             });
         self.joins = enrich_joins;
 
+        // Aliases of INNER JOIN tables — their WHERE conditions filter root rows
+        // (needed for both subquery building and total COUNT generation).
+        let filter_aliases: Vec<String> = filter_joins.iter()
+            .filter_map(|j| Self::extract_join_alias(j))
+            .collect();
+
         let has_regular_joins = self.joins.iter().any(|j| !j.contains("LATERAL"))
             || !filter_joins.is_empty();
         let use_root_subquery = root.is_list
@@ -93,15 +99,12 @@ impl SqlGenerator {
             && limit_opt.is_some()
             && !self.froms.is_empty();
 
+        // Conditions that affect root row count — populated below, used for total COUNT.
+        let mut total_count_wheres: Vec<String> = Vec::new();
+
         if use_root_subquery {
             let root_alias = root.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or("");
             let root_prefix = format!("{}.", root_alias);
-
-            // Aliases of tables brought in by INNER JOINs — their WHERE conditions must
-            // also move into the subquery so filtering happens before LIMIT.
-            let filter_aliases: Vec<String> = filter_joins.iter()
-                .filter_map(|j| Self::extract_join_alias(j))
-                .collect();
 
             // Route WHERE conditions:
             //   root-table columns + INNER-JOIN-table columns  → subquery WHERE
@@ -112,6 +115,8 @@ impl SqlGenerator {
                     w.starts_with(&root_prefix)
                         || filter_aliases.iter().any(|a| w.starts_with(&format!("{}.", a)))
                 });
+
+            total_count_wheres = subq_wheres.clone();
 
             // Root subquery: root table + INNER JOINs + their conditions + LIMIT.
             // Selecting only root_alias.* avoids column-name ambiguity when both tables
@@ -185,6 +190,19 @@ impl SqlGenerator {
                 base_sql.push_str("\nWHERE ");
                 base_sql.push_str(&self.wheres.join(" AND "));
             }
+            // For list queries collect conditions that affect root row count
+            if root.is_list {
+                if let Some(source) = &root.source {
+                    let root_prefix = format!("{}.", source.table_name);
+                    total_count_wheres = self.wheres.iter()
+                        .filter(|w| {
+                            w.starts_with(&root_prefix)
+                                || filter_aliases.iter().any(|a| w.starts_with(&format!("{}.", a)))
+                        })
+                        .cloned()
+                        .collect();
+                }
+            }
             if let Some(source) = &root.source {
                 let _root_real = self.guard.resolve_alias(&source.table_name)?;
                 let root_alias = &source.table_name;
@@ -231,9 +249,29 @@ impl SqlGenerator {
             final_sql.push_str(") t");
         }
 
+        // Build total COUNT SQL for list queries (same filters, no LIMIT/OFFSET)
+        let total_sql: Option<String> = if root.is_list {
+            root.source.as_ref().and_then(|source| {
+                self.guard.resolve_alias(&source.table_name).ok().map(|root_real| {
+                    let root_alias = &source.table_name;
+                    let mut count_sql = format!("SELECT COUNT(*) FROM {} AS {}", root_real, root_alias);
+                    for j in &filter_joins {
+                        count_sql.push_str(&format!("\n{}", j));
+                    }
+                    if !total_count_wheres.is_empty() {
+                        count_sql.push_str(&format!("\nWHERE {}", total_count_wheres.join(" AND ")));
+                    }
+                    count_sql
+                })
+            })
+        } else {
+            None
+        };
+
         Ok(ParseResult {
             is_ok: true,
             sql: Some(final_sql),
+            total: total_sql,
             params: Some(self.params),
             message: "success".to_string(),
         })

@@ -43,6 +43,8 @@ pub struct ParseResult {
     #[serde(rename = "isOk")]
     pub is_ok: bool,
     pub sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<String>,
     pub params: Option<IndexMap<String, Value>>,
     pub message: String,
 }

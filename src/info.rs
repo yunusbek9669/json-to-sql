@@ -14,7 +14,30 @@ pub fn process_info_request(
     relations_str: Option<&str>,
     macros_str: Option<&str>,
 ) -> Value {
-    let (is_tables, table_filter) = parse_tables_directive(info_arr);
+    let directive = parse_tables_directive(info_arr);
+
+    if let TableDirective::EmptyError = directive {
+        return json!({
+            "isOk": false,
+            "sql": null,
+            "params": null,
+            "message": "@tables requires a value: use @tables[*] for all tables or @tables[t1, t2~] for specific ones"
+        });
+    }
+
+    let is_tables = !matches!(directive, TableDirective::NotPresent);
+
+    // Resolve table_filter: expand any "prefix~" patterns against whitelist aliases
+    let table_filter: Option<Vec<String>> = match directive {
+        TableDirective::Filter(patterns) => {
+            let wl_str = whitelist_str.unwrap_or("{}");
+            let wl: IndexMap<String, Value> = serde_json::from_str(wl_str).unwrap_or_default();
+            let all_aliases: Vec<String> = wl.keys().map(|k| whitelist_key_alias(k).to_string()).collect();
+            Some(expand_table_filter(patterns, &all_aliases))
+        }
+        _ => None,
+    };
+
     let is_relations = info_arr.iter().any(|v| v.as_str() == Some("@relations"));
     
     let mut info_result = serde_json::Map::new();
@@ -57,11 +80,8 @@ pub fn process_info_request(
         // Build table alias mapping from whitelist
         let mut table_mappings = HashMap::new();
         for (key, val) in &wl {
-            let (real, alias) = if let Some((n, a)) = key.split_once(':') {
-                (n, a)
-            } else {
-                (key.as_str(), key.as_str())
-            };
+            let real = whitelist_key_real(key);
+            let alias = whitelist_key_alias(key);
             
             let mut col_map = HashMap::new();
             let mut unrestricted_star = false;
@@ -98,20 +118,11 @@ pub fn process_info_request(
         // Resolve macros and normal tables in whitelist
         let mut resolved_wl = IndexMap::new();
         for (key, val) in wl {
-            let (_, alias) = if let Some((n, a)) = key.split_once(':') {
-                (n, a)
-            } else {
-                (key.as_str(), key.as_str())
-            };
+            let real_name = whitelist_key_real(&key);
+            let alias = whitelist_key_alias(&key);
 
             let mut final_mappings = IndexMap::new();
-            let is_macro = if let Some(macro_val) = macros.get(alias).or_else(|| {
-                if let Some((n, _)) = key.split_once(':') {
-                    macros.get(n)
-                } else {
-                    None
-                }
-            }) {
+            let is_macro = if let Some(macro_val) = macros.get(alias).or_else(|| macros.get(real_name)) {
                 // It's a macro - Collect all exposed fields with their real table:col mapping
                 final_mappings = collect_macro_fields(macro_val, &table_mappings);
 
@@ -424,27 +435,72 @@ fn find_connecting_relations(
     included
 }
 
-fn parse_tables_directive(info_arr: &[Value]) -> (bool, Option<Vec<String>>) {
+enum TableDirective {
+    NotPresent,
+    All,
+    EmptyError,
+    Filter(Vec<String>),
+}
+
+fn parse_tables_directive(info_arr: &[Value]) -> TableDirective {
     for v in info_arr {
         if let Some(s) = v.as_str() {
             if s == "@tables" {
-                return (true, None);
+                return TableDirective::EmptyError;
             }
             if s.starts_with("@tables[") && s.ends_with(']') {
                 let inner = s["@tables[".len()..s.len() - 1].trim();
-                if inner == "*" {
-                    return (true, None);
+                if inner.is_empty() {
+                    return TableDirective::EmptyError;
                 }
-                let names = inner
+                if inner == "*" {
+                    return TableDirective::All;
+                }
+                let names: Vec<String> = inner
                     .split(',')
                     .map(|x| x.trim().to_string())
                     .filter(|x| !x.is_empty())
                     .collect();
-                return (true, Some(names));
+                if names.is_empty() {
+                    return TableDirective::EmptyError;
+                }
+                return TableDirective::Filter(names);
             }
         }
     }
-    (false, None)
+    TableDirective::NotPresent
+}
+
+/// Expands filter patterns against known aliases.
+/// Patterns ending with `~` are treated as prefix matches.
+/// Example: `"employee~"` matches `"employeeAction"`, `"employeeType"`, etc.
+fn expand_table_filter(patterns: Vec<String>, all_aliases: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for pattern in patterns {
+        if let Some(prefix) = pattern.strip_suffix('~') {
+            for alias in all_aliases {
+                if alias.starts_with(prefix) && !result.contains(alias) {
+                    result.push(alias.clone());
+                }
+            }
+        } else if !result.contains(&pattern) {
+            result.push(pattern);
+        }
+    }
+    result
+}
+
+/// Extracts the effective alias from a whitelist key.
+/// Handles: "table", "table:alias", "table[filter]", "table:alias[filter]"
+fn whitelist_key_alias(key: &str) -> &str {
+    let base = if let Some(pos) = key.find('[') { key[..pos].trim() } else { key.trim() };
+    if let Some((_, alias)) = base.split_once(':') { alias.trim() } else { base }
+}
+
+/// Extracts the real table name from a whitelist key.
+fn whitelist_key_real(key: &str) -> &str {
+    let base = if let Some(pos) = key.find('[') { key[..pos].trim() } else { key.trim() };
+    if let Some((real, _)) = base.split_once(':') { real.trim() } else { base }
 }
 
 fn relation_endpoints(key: &str) -> (String, String) {
@@ -522,7 +578,11 @@ fn annotate_relation(key: &str, template: &str) -> String {
         _ => return key.to_string(),
     };
 
-    format!("{}({}){}{}({})", left, left_card, op, right, right_card)
+    match (left_card, right_card) {
+        ("one", "many") => format!("{}(one)->{}(many)", left, right),
+        ("many", "one") => format!("{}(one)<-{}(many)", right, left),
+        _ => format!("{}({}){}{}({})", left, left_card, op, right, right_card),
+    }
 }
 
 fn collect_macro_fields(

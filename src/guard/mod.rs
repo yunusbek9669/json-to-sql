@@ -4,6 +4,7 @@ pub mod formatter;
 
 use std::collections::{HashMap, HashSet};
 use indexmap::{IndexMap, IndexSet};
+use crate::models::FilterRule;
 
 #[derive(Debug, Clone)]
 pub enum WhitelistRule {
@@ -50,15 +51,27 @@ pub struct Guard {
     pub alias_map: HashMap<String, String>,
     /// Set of real table names that have aliases (for enforcement)
     pub aliased_tables: HashSet<String>,
+    /// alias -> backend-defined default filters (from whitelist key syntax "table[status:1]")
+    pub default_filters: HashMap<String, Vec<FilterRule>>,
 }
 
 impl Guard {
-    /// Parses whitelist keys with optional alias: "real_table:alias" -> columns
-    /// Builds both whitelist (alias -> rule) and alias_map (alias -> real_table)
+    /// Parses whitelist keys with optional alias and optional default filters.
+    ///
+    /// Supported key formats:
+    ///   "real_table"                   → no alias, no default filters
+    ///   "real_table:alias"             → with alias, no default filters
+    ///   "real_table[status:1]"         → no alias, with backend-defined default filter
+    ///   "real_table:alias[status:1]"   → with alias and backend-defined default filter
+    ///
+    /// Default filters (inside `[...]`) are applied automatically to every query that uses
+    /// the table. The filtered columns do NOT need to appear in the whitelist column list
+    /// because these conditions are backend-defined, not user-supplied.
     pub fn new(raw_whitelist: Option<IndexMap<String, serde_json::Value>>) -> Self {
         let mut alias_map = HashMap::new();
         let mut aliased_tables = HashSet::new();
-        
+        let mut default_filters: HashMap<String, Vec<FilterRule>> = HashMap::new();
+
         let whitelist = if let Some(raw) = raw_whitelist {
             let mut clean_whitelist = IndexMap::new();
             for (key, val) in raw {
@@ -82,26 +95,57 @@ impl Guard {
                     WhitelistRule::Allowed(IndexSet::new())
                 };
 
-                if let Some((real_table, alias)) = key.split_once(':') {
+                // Extract optional "[filter]" suffix from the key
+                let (base_key, filter_str) = if let Some(bracket_pos) = key.find('[') {
+                    let filter_content = if key.ends_with(']') {
+                        key[bracket_pos + 1..key.len() - 1].trim().to_string()
+                    } else {
+                        key[bracket_pos + 1..].trim().to_string()
+                    };
+                    (key[..bracket_pos].trim().to_string(), Some(filter_content))
+                } else {
+                    (key.trim().to_string(), None)
+                };
+
+                // Parse optional ":alias" from base_key
+                let effective_key = if let Some((real_table, alias)) = base_key.split_once(':') {
                     let real_table = real_table.trim().to_string();
                     let alias = alias.trim().to_string();
                     alias_map.insert(alias.clone(), real_table.clone());
                     aliased_tables.insert(real_table.clone());
-                    clean_whitelist.insert(alias, rule);
+                    alias
                 } else {
-                    clean_whitelist.insert(key, rule);
+                    base_key
+                };
+
+                // Parse and store default filters if present
+                if let Some(fs) = filter_str {
+                    if !fs.is_empty() {
+                        let filters = parse_default_filters(&fs);
+                        if !filters.is_empty() {
+                            default_filters.insert(effective_key.clone(), filters);
+                        }
+                    }
                 }
+
+                clean_whitelist.insert(effective_key, rule);
             }
             Some(clean_whitelist)
         } else {
             None
         };
-        
-        Self { 
-            whitelist, 
-            alias_map, 
-            aliased_tables 
+
+        Self {
+            whitelist,
+            alias_map,
+            aliased_tables,
+            default_filters,
         }
+    }
+
+    /// Returns the default filters for a given alias (or empty slice if none).
+    pub fn get_default_filters(&self, alias: &str) -> &[FilterRule] {
+        self.default_filters.get(alias).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Resolves an alias to a real table name.
@@ -120,5 +164,66 @@ impl Guard {
         
         // No alias exists — use the name directly
         Ok(name.to_string())
+    }
+}
+
+/// Parses a filter string like "status:1, type!:0" into FilterRule vec.
+/// Used for backend-defined default filters in whitelist keys.
+fn parse_default_filters(filter_str: &str) -> Vec<FilterRule> {
+    let mut filters = Vec::new();
+    for part in split_filter_args(filter_str) {
+        if let Some((field, rest)) = part.split_once(':') {
+            let field = field.trim();
+            if field.is_empty() || field.starts_with('$') {
+                continue;
+            }
+            let rest = rest.trim();
+            let (operator, value) = parse_filter_value(rest);
+            filters.push(FilterRule { field: field.to_string(), operator, value });
+        }
+    }
+    filters
+}
+
+/// Splits a filter string by top-level commas (ignoring commas inside `(...)` or `[...]`).
+fn split_filter_args(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => { depth += 1; current.push(c); }
+            ')' | ']' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                let t = current.trim().to_string();
+                if !t.is_empty() { parts.push(t); }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    let t = current.trim().to_string();
+    if !t.is_empty() { parts.push(t); }
+    parts
+}
+
+/// Parses the value portion of a filter rule (everything after the first `:`).
+fn parse_filter_value(input: &str) -> (String, String) {
+    let input = input.trim();
+    if input.starts_with("!:") {
+        ("neq".to_string(), input[2..].trim().to_string())
+    } else if input.starts_with('>') {
+        ("gt".to_string(), input[1..].trim().to_string())
+    } else if input.starts_with('<') {
+        ("lt".to_string(), input[1..].trim().to_string())
+    } else if input.starts_with('~') {
+        ("like".to_string(), input[1..].trim().to_string())
+    } else if input.to_ascii_lowercase().starts_with("in ") {
+        ("in".to_string(), input[3..].trim().to_string())
+    } else if input.contains("..") {
+        ("between".to_string(), input.to_string())
+    } else {
+        let val = if input.starts_with(':') { input[1..].trim().to_string() } else { input.to_string() };
+        ("eq".to_string(), val)
     }
 }
