@@ -37,7 +37,7 @@ impl SqlGenerator {
             }
             "like" => {
                 let p = self.next_param(Value::String(filter.value.clone()));
-                Ok(format!("{} LIKE {}", column_ref, p))
+                Ok(format!("{} ILIKE {}", column_ref, p))
             }
             "in" => {
                 let val = filter.value.trim_matches(|c| c == '(' || c == ')');
@@ -84,7 +84,7 @@ impl SqlGenerator {
             }
             "like" => {
                 let p = self.next_param(Value::String(filter.value.clone()));
-                Ok(format!("{} LIKE {}", column_ref, p))
+                Ok(format!("{} ILIKE {}", column_ref, p))
             }
             "in" => {
                 let val = filter.value.trim_matches(|c| c == '(' || c == ')');

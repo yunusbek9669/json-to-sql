@@ -13,6 +13,7 @@ pub struct FilterRule {
 pub struct SourceDef {
     pub table_name: String,
     pub filters: Vec<FilterRule>,
+    pub or_groups: Vec<Vec<FilterRule>>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
     pub order: Option<String>,

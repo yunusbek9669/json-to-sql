@@ -955,3 +955,58 @@ fn test_total_count_sql() {
     assert!(result2.total.is_none(), "non-list query must not have total");
     assert!(result2.total_params.is_none(), "non-list query must not have total_params");
 }
+
+#[test]
+fn test_or_group() {
+    let wl = indexmap::IndexMap::from([
+        ("employee".to_string(), json!(["id", "nameUz", "nameRu", "status"])),
+    ]);
+
+    // 1. Parse: $or: [...] — or_groups to'g'ri parse qilinishi
+    let src = parser::parse_source("employee[$or: [nameUz: ~ Ali%, nameRu: ~ Ali%]]");
+    assert_eq!(src.filters.len(), 0, "filters bo'sh bo'lishi kerak");
+    assert_eq!(src.or_groups.len(), 1, "bitta or_group bo'lishi kerak");
+    assert_eq!(src.or_groups[0].len(), 2, "or_group ichida 2 ta filter");
+    assert_eq!(src.or_groups[0][0].field, "nameUz");
+    assert_eq!(src.or_groups[0][0].operator, "like");
+    assert_eq!(src.or_groups[0][1].field, "nameRu");
+    assert_eq!(src.or_groups[0][1].operator, "like");
+
+    // 2. SQL generatsiya: (nameUz LIKE :p1 OR nameRu LIKE :p2)
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "employee[$or: [nameUz: ~ Ali%, nameRu: ~ Ali%]]",
+            "@fields": {"id": "id", "nameUz": "nameUz"}
+        }
+    }"#;
+    let root = parser::parse_json(json_input, None).expect("parse bo'lishi kerak");
+    let result = generator::SqlGenerator::new(Some(wl.clone()), None)
+        .generate(root)
+        .expect("SQL generatsiya bo'lishi kerak");
+    let sql = result.sql.unwrap();
+    println!("OR SQL: {}", sql);
+    assert!(sql.contains("OR"), "SQL da OR bo'lishi kerak");
+    assert!(sql.contains("LIKE"), "SQL da LIKE bo'lishi kerak");
+
+    // 3. AND + OR birga
+    let src2 = parser::parse_source("employee[status: 1, $or: [nameUz: ~ Vali%, nameRu: ~ Vali%]]");
+    assert_eq!(src2.filters.len(), 1, "bitta AND filter");
+    assert_eq!(src2.or_groups.len(), 1, "bitta OR group");
+
+    let json2 = r#"{
+        "@data[]": {
+            "@source": "employee[status: 1, $or: [nameUz: ~ Vali%, nameRu: ~ Vali%]]",
+            "@fields": {"id": "id"}
+        }
+    }"#;
+    let root2 = parser::parse_json(json2, None).expect("parse bo'lishi kerak");
+    let result2 = generator::SqlGenerator::new(Some(wl.clone()), None)
+        .generate(root2)
+        .expect("SQL generatsiya bo'lishi kerak");
+    let sql2 = result2.sql.unwrap();
+    println!("AND+OR SQL: {}", sql2);
+    assert!(sql2.contains("OR"), "OR bo'lishi kerak");
+    assert!(sql2.contains(":p1"), "AND filter parametri bo'lishi kerak");
+
+    println!("OR group testlari o'tdi ✓");
+}

@@ -41,6 +41,7 @@ pub fn parse_source(source_str: &str) -> SourceDef {
     let table_name = caps.get(1).map_or("", |m| m.as_str()).to_string();
     
     let mut filters = Vec::new();
+    let mut or_groups: Vec<Vec<FilterRule>> = Vec::new();
     let mut limit = None;
     let mut offset = None;
     let mut order = None;
@@ -99,6 +100,19 @@ pub fn parse_source(source_str: &str) -> SourceDef {
                                 rel = Some(rest.to_string());
                             }
                         }
+                        "$or" => {
+                            let inner = rest.trim_start_matches('[').trim_end_matches(']');
+                            let mut group = Vec::new();
+                            for or_part in split_source_args(inner) {
+                                if let Some((or_field, or_rest)) = or_part.split_once(':') {
+                                    let (operator, value) = parse_operator_and_value(or_rest.trim());
+                                    group.push(FilterRule { field: or_field.trim().to_string(), operator, value });
+                                }
+                            }
+                            if !group.is_empty() {
+                                or_groups.push(group);
+                            }
+                        }
                         _ => {
                             let (operator, value) = parse_operator_and_value(rest);
                             filters.push(FilterRule { field: field.to_string(), operator, value });
@@ -109,7 +123,7 @@ pub fn parse_source(source_str: &str) -> SourceDef {
         }
     }
     
-    SourceDef { table_name, filters, limit, offset, order, join_type, rel, from_macro: false }
+    SourceDef { table_name, filters, or_groups, limit, offset, order, join_type, rel, from_macro: false }
 }
 
 fn parse_operator_and_value(input: &str) -> (String, String) {

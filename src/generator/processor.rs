@@ -36,6 +36,7 @@ impl SqlGenerator {
                 && !node.is_list
                 && node.children.is_empty()
                 && source.filters.is_empty()
+                && source.or_groups.is_empty()
                 && !has_default_filters
                 && self.all_fields_local_agg_check(&node.fields);
 
@@ -71,6 +72,15 @@ impl SqlGenerator {
                 for filter in self.guard.get_default_filters(&current_alias).to_vec() {
                     let condition = self.build_trusted_condition(&current_alias, &filter)?;
                     self.wheres.push(condition);
+                }
+                for or_group in &source.or_groups {
+                    let mut or_parts = Vec::new();
+                    for filter in or_group {
+                        or_parts.push(self.build_condition(&current_alias, filter, Some(&node.fields))?);
+                    }
+                    if !or_parts.is_empty() {
+                        self.wheres.push(format!("({})", or_parts.join(" OR ")));
+                    }
                 }
             }
         }
@@ -344,6 +354,15 @@ impl SqlGenerator {
         for filter in &source.filters { where_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?); }
         for filter in self.guard.get_default_filters(child_alias).to_vec() {
             where_parts.push(self.build_trusted_condition(child_alias, &filter)?);
+        }
+        for or_group in &source.or_groups {
+            let mut or_parts = Vec::new();
+            for filter in or_group {
+                or_parts.push(self.build_condition(child_alias, filter, Some(&node.fields))?);
+            }
+            if !or_parts.is_empty() {
+                where_parts.push(format!("({})", or_parts.join(" OR ")));
+            }
         }
         where_parts.extend(inner_wheres);
         
