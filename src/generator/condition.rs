@@ -57,6 +57,8 @@ impl SqlGenerator {
                     Err(format!("Invalid between syntax: {}", filter.value))
                 }
             }
+            "is_null"     => Ok(format!("{} IS NULL", column_ref)),
+            "is_not_null" => Ok(format!("{} IS NOT NULL", column_ref)),
             _ => Err(format!("Unsupported operator: {}", filter.operator))
         }
     }
@@ -104,6 +106,8 @@ impl SqlGenerator {
                     Err(format!("Invalid between syntax: {}", filter.value))
                 }
             }
+            "is_null"     => Ok(format!("{} IS NULL", column_ref)),
+            "is_not_null" => Ok(format!("{} IS NOT NULL", column_ref)),
             _ => Err(format!("Unsupported operator: {}", filter.operator))
         }
     }

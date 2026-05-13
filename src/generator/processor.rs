@@ -370,7 +370,9 @@ impl SqlGenerator {
         for ij in &inner_joins { inner_sql.push_str(&format!("\n    {}", ij)); }
         inner_sql.push_str(&format!("\n    WHERE {}", where_parts.join(" AND ")));
         
-        if let Some(order) = &source.order {
+        let effective_order = source.order.as_deref()
+            .or_else(|| self.guard.get_default_order(child_alias));
+        if let Some(order) = effective_order {
             if self.guard.is_safe_order_by(order).is_ok() {
                 let expanded = self.guard.expand_mapped_fields(order, child_alias);
                 let prefixed = Guard::auto_prefix_field(&expanded, child_alias, None);

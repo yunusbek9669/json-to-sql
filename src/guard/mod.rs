@@ -53,6 +53,8 @@ pub struct Guard {
     pub aliased_tables: HashSet<String>,
     /// alias -> backend-defined default filters (from whitelist key syntax "table[status:1]")
     pub default_filters: HashMap<String, Vec<FilterRule>>,
+    /// alias -> backend-defined default ORDER BY (from whitelist key syntax "table[$order: col ASC]")
+    pub default_order: HashMap<String, String>,
 }
 
 impl Guard {
@@ -71,6 +73,7 @@ impl Guard {
         let mut alias_map = HashMap::new();
         let mut aliased_tables = HashSet::new();
         let mut default_filters: HashMap<String, Vec<FilterRule>> = HashMap::new();
+        let mut default_order: HashMap<String, String> = HashMap::new();
 
         let whitelist = if let Some(raw) = raw_whitelist {
             let mut clean_whitelist = IndexMap::new();
@@ -118,9 +121,12 @@ impl Guard {
                     base_key
                 };
 
-                // Parse and store default filters if present
+                // Parse and store default filters / order if present
                 if let Some(fs) = filter_str {
                     if !fs.is_empty() {
+                        if let Some(ord) = parse_default_order_param(&fs) {
+                            default_order.insert(effective_key.clone(), ord);
+                        }
                         let filters = parse_default_filters(&fs);
                         if !filters.is_empty() {
                             default_filters.insert(effective_key.clone(), filters);
@@ -140,12 +146,19 @@ impl Guard {
             alias_map,
             aliased_tables,
             default_filters,
+            default_order,
         }
     }
 
     /// Returns the default filters for a given alias (or empty slice if none).
     pub fn get_default_filters(&self, alias: &str) -> &[FilterRule] {
         self.default_filters.get(alias).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Returns the default ORDER BY for a given alias, if set in the whitelist key.
+    /// User-supplied `$order` in `@source` always takes precedence over this.
+    pub fn get_default_order(&self, alias: &str) -> Option<&str> {
+        self.default_order.get(alias).map(|s| s.as_str())
     }
 
     /// Resolves an alias to a real table name.
@@ -165,6 +178,25 @@ impl Guard {
         // No alias exists — use the name directly
         Ok(name.to_string())
     }
+}
+
+/// Extracts `$order` value from a whitelist filter string, e.g. "status:1, $order: col ASC".
+/// Returns `None` if absent or value is not safe.
+fn parse_default_order_param(filter_str: &str) -> Option<String> {
+    for part in split_filter_args(filter_str) {
+        if let Some((field, rest)) = part.split_once(':') {
+            if field.trim() == "$order" {
+                let val = rest.trim();
+                // Allow only word chars, dots, and optional trailing ASC/DESC
+                if !val.is_empty()
+                    && val.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ' ')
+                {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Parses a filter string like "status:1, type!:0" into FilterRule vec.
@@ -210,7 +242,11 @@ fn split_filter_args(s: &str) -> Vec<String> {
 /// Parses the value portion of a filter rule (everything after the first `:`).
 fn parse_filter_value(input: &str) -> (String, String) {
     let input = input.trim();
-    if input.starts_with("!:") {
+    if input.eq_ignore_ascii_case("null") {
+        ("is_null".to_string(), String::new())
+    } else if input.eq_ignore_ascii_case("!null") {
+        ("is_not_null".to_string(), String::new())
+    } else if input.starts_with("!:") {
         ("neq".to_string(), input[2..].trim().to_string())
     } else if input.starts_with('>') {
         ("gt".to_string(), input[1..].trim().to_string())

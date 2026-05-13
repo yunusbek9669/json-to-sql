@@ -836,6 +836,109 @@ fn test_whitelist_default_filter() {
 }
 
 #[test]
+fn test_whitelist_default_order() {
+    // Whitelist key with $order: default ORDER BY applied when user doesn't supply one
+    let json_no_order = r#"{
+        "@data[]": {
+            "@source": "educationInstitutionType",
+            "@fields": { "id": "id", "nameUz": "nameUz" }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert(
+        "manuals_educational_institution_type:educationInstitutionType[status: 1, $order: order_number ASC]".to_string(),
+        json!({"id": "id", "nameUz": "name_uz"}),
+    );
+
+    let root = parser::parse_json(json_no_order, None).unwrap();
+    let result = generator::SqlGenerator::new(Some(wl.clone()), None)
+        .generate(root)
+        .expect("should generate SQL");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("Default order SQL:\n{}", sql);
+    assert!(sql.contains("ORDER BY"), "default order must appear");
+    assert!(sql.contains("order_number ASC"), "must use whitelist default order value");
+
+    // When user supplies $order in @source, it must override the whitelist default
+    let json_with_order = r#"{
+        "@data[]": {
+            "@source": "educationInstitutionType[$order: id DESC]",
+            "@fields": { "id": "id", "nameUz": "nameUz" }
+        }
+    }"#;
+
+    let root2 = parser::parse_json(json_with_order, None).unwrap();
+    let result2 = generator::SqlGenerator::new(Some(wl), None)
+        .generate(root2)
+        .expect("should generate SQL with user order");
+
+    let sql2 = result2.sql.as_ref().unwrap();
+    println!("User-override order SQL:\n{}", sql2);
+    assert!(sql2.contains("ORDER BY"), "order must appear");
+    assert!(sql2.contains("id DESC"), "user-supplied order must win");
+    assert!(!sql2.contains("order_number"), "whitelist default must NOT appear when user supplies order");
+}
+
+#[test]
+fn test_whitelist_default_filter_null_operators() {
+    // Whitelist key: "table:alias[status: 1, parent_id: null]"
+    // parent_id: null  → IS NULL (no param)
+    // parent_id: !null → IS NOT NULL (no param)
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "educationAcademicDegreeCategory",
+            "@fields": { "id": "id", "parentId": "parentId" }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert(
+        "manuals_academic_degree:educationAcademicDegreeCategory[status: 1, parent_id: null]".to_string(),
+        json!({"id": "id", "parentId": "parent_id"}),
+    );
+
+    let root = parser::parse_json(json_input, None).unwrap();
+    let result = generator::SqlGenerator::new(Some(wl), None)
+        .generate(root)
+        .expect("should generate SQL");
+
+    let sql = result.sql.as_ref().unwrap();
+    let params = result.params.as_ref().unwrap();
+    println!("Whitelist null default filter SQL:\n{}", sql);
+
+    assert!(sql.contains("IS NULL"), "parent_id: null must generate IS NULL");
+    assert!(!sql.contains("= 'null'"), "must not emit string = 'null'");
+    // Only one param: status = :p1 (IS NULL generates no param)
+    assert_eq!(params.len(), 1, "only status param should exist");
+
+    // !null → IS NOT NULL
+    let mut wl2 = indexmap::IndexMap::new();
+    wl2.insert(
+        "manuals_academic_degree:educationAcademicDegree[status: 1, parent_id: !null]".to_string(),
+        json!({"id": "id", "parentId": "parent_id"}),
+    );
+
+    let json_input2 = r#"{
+        "@data[]": {
+            "@source": "educationAcademicDegree",
+            "@fields": { "id": "id", "parentId": "parentId" }
+        }
+    }"#;
+
+    let root2 = parser::parse_json(json_input2, None).unwrap();
+    let result2 = generator::SqlGenerator::new(Some(wl2), None)
+        .generate(root2)
+        .expect("!null should generate IS NOT NULL");
+
+    let sql2 = result2.sql.as_ref().unwrap();
+    println!("Whitelist !null default filter SQL:\n{}", sql2);
+    assert!(sql2.contains("IS NOT NULL"), "parent_id: !null must generate IS NOT NULL");
+    assert!(!sql2.contains("= '!null'"), "must not emit string = '!null'");
+}
+
+#[test]
 fn test_total_count_sql() {
     // Simple list: total must be SELECT COUNT(*) FROM table WHERE <root filters>
     let json_input = r#"{
@@ -1009,4 +1112,60 @@ fn test_or_group() {
     assert!(sql2.contains(":p1"), "AND filter parametri bo'lishi kerak");
 
     println!("OR group testlari o'tdi ✓");
+}
+
+#[test]
+fn test_null_operators() {
+    // field: null  → IS NULL
+    // field: !null → IS NOT NULL
+    let json_input = r#"{
+        "@data[]": {
+            "@source": "emp[deleted_at: null, manager_id: !null, status: 1]",
+            "@fields": { "id": "id", "name": "last_name" }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert(
+        "employee:emp".to_string(),
+        json!(["id", "last_name", "status", "deleted_at", "manager_id"]),
+    );
+
+    let root   = parser::parse_json(json_input, None).expect("parse failed");
+    let result = generator::SqlGenerator::new(Some(wl), None)
+        .generate(root)
+        .expect("generate failed");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("NULL operators SQL:\n{}", sql);
+
+    assert!(sql.contains("emp.deleted_at IS NULL"),     "IS NULL bo'lishi kerak");
+    assert!(sql.contains("emp.manager_id IS NOT NULL"), "IS NOT NULL bo'lishi kerak");
+    assert!(sql.contains(":p1"),                        "status uchun param bo'lishi kerak");
+
+    // IS NULL / IS NOT NULL uchun qo'shimcha param yaratilmasligi kerak
+    let params = result.params.as_ref().unwrap();
+    assert_eq!(params.len(), 1, "faqat status uchun 1 ta param bo'lishi kerak");
+
+    // Case-insensitive: NULL va !NULL ham ishlashi kerak
+    let json_upper = r#"{
+        "@data[]": {
+            "@source": "emp[deleted_at: NULL, manager_id: !NULL]",
+            "@fields": { "id": "id" }
+        }
+    }"#;
+    let mut wl2 = indexmap::IndexMap::new();
+    wl2.insert("employee:emp".to_string(), json!(["id", "deleted_at", "manager_id"]));
+
+    let root2   = parser::parse_json(json_upper, None).expect("parse failed (upper)");
+    let result2 = generator::SqlGenerator::new(Some(wl2), None)
+        .generate(root2)
+        .expect("generate failed (upper)");
+
+    let sql2 = result2.sql.as_ref().unwrap();
+    assert!(sql2.contains("IS NULL"),     "uppercase NULL: IS NULL bo'lishi kerak");
+    assert!(sql2.contains("IS NOT NULL"), "uppercase !NULL: IS NOT NULL bo'lishi kerak");
+    assert!(result2.params.as_ref().unwrap().is_empty(), "NULL uchun param bo'lmasligi kerak");
+
+    println!("NULL operators testlari o'tdi ✓");
 }

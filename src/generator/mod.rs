@@ -69,7 +69,10 @@ impl SqlGenerator {
 
         let limit_opt  = root.source.as_ref().and_then(|s| s.limit);
         let offset_opt = root.source.as_ref().and_then(|s| s.offset);
-        let order_opt  = root.source.as_ref().and_then(|s| s.order.clone());
+        let root_table_name = root.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or("");
+        let order_opt: Option<String> = root.source.as_ref()
+            .and_then(|s| s.order.clone())
+            .or_else(|| self.guard.get_default_order(root_table_name).map(|s| s.to_string()));
 
         // Split joins into two categories:
         // - filter_joins (INNER JOIN): reduce rows — must be inside the root subquery so
@@ -206,7 +209,9 @@ impl SqlGenerator {
             if let Some(source) = &root.source {
                 let _root_real = self.guard.resolve_alias(&source.table_name)?;
                 let root_alias = &source.table_name;
-                if let Some(order) = &source.order {
+                let effective_order = source.order.as_deref()
+                    .or_else(|| self.guard.get_default_order(root_alias));
+                if let Some(order) = effective_order {
                     if self.guard.is_safe_order_by(order).is_ok() {
                         let expanded = self.guard.expand_mapped_fields(order, root_alias);
                         let prefixed_order = Guard::auto_prefix_field(&expanded, root_alias, None);

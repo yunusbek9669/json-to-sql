@@ -128,7 +128,11 @@ pub fn parse_source(source_str: &str) -> SourceDef {
 
 fn parse_operator_and_value(input: &str) -> (String, String) {
     let input = input.trim();
-    if input.starts_with("!:") {
+    if input.eq_ignore_ascii_case("null") {
+        ("is_null".to_string(), String::new())
+    } else if input.eq_ignore_ascii_case("!null") {
+        ("is_not_null".to_string(), String::new())
+    } else if input.starts_with("!:") {
         ("neq".to_string(), input[2..].trim().to_string())
     } else if input.starts_with(">") {
         ("gt".to_string(), input[1..].trim().to_string())
