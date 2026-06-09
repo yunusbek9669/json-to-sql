@@ -73,7 +73,7 @@ pub fn parse_source(source_str: &str) -> SourceDef {
                             // FIX #3: validate $order at parse time — only "col [ASC|DESC]".
                             static ORDER_RE: once_cell::sync::Lazy<Regex> =
                                 once_cell::sync::Lazy::new(|| {
-                                    Regex::new(r"(?i)^[a-zA-Z0-9_\.]+(\s+(ASC|DESC))?$").unwrap()
+                                    Regex::new(r"(?i)^[a-zA-Z0-9_\.]+(\s+(ASC|DESC))?(\s*,\s*[a-zA-Z0-9_\.]+(\s+(ASC|DESC))?)*$").unwrap()
                                 });
                             if Guard::check_global_threats(rest).is_ok() && ORDER_RE.is_match(rest) {
                                 order = Some(rest.to_string());

@@ -143,21 +143,21 @@ impl Guard {
 
     pub fn is_safe_order_by(&self, order: &str) -> Result<(), String> {
         Self::check_global_threats(order)?;
-        let parts: Vec<&str> = order.split_whitespace().collect();
-        if parts.is_empty() || parts.len() > 2 {
-            return Err("Invalid ORDER BY format".to_string());
-        }
-
-        static RE_ORDER: once_cell::sync::Lazy<Regex> =
+        static RE_COL: once_cell::sync::Lazy<Regex> =
             once_cell::sync::Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_\.]+$").unwrap());
-        if !RE_ORDER.is_match(parts[0]) {
-            return Err("Invalid ORDER BY identifier format".to_string());
-        }
-
-        if parts.len() == 2 {
-            let dir = parts[1].to_uppercase();
-            if dir != "ASC" && dir != "DESC" {
-                return Err("ORDER BY direction must be ASC or DESC".to_string());
+        for col_expr in order.split(',') {
+            let parts: Vec<&str> = col_expr.split_whitespace().collect();
+            if parts.is_empty() || parts.len() > 2 {
+                return Err("Invalid ORDER BY format".to_string());
+            }
+            if !RE_COL.is_match(parts[0]) {
+                return Err("Invalid ORDER BY identifier format".to_string());
+            }
+            if parts.len() == 2 {
+                let dir = parts[1].to_uppercase();
+                if dir != "ASC" && dir != "DESC" {
+                    return Err("ORDER BY direction must be ASC or DESC".to_string());
+                }
             }
         }
         Ok(())

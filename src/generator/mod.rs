@@ -40,6 +40,36 @@ impl SqlGenerator {
         }
     }
 
+    /// Builds a validated ORDER BY clause string for one or more comma-separated columns.
+    /// Each `col [ASC|DESC]` is expand-mapped and alias-prefixed individually.
+    /// Example: `"nameUz ASC, id DESC"` → `"alias.name_uz ASC, alias.id DESC"`
+    pub(crate) fn build_order_by_clause(&self, order: &str, alias: &str) -> String {
+        order.split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                if part.is_empty() { return None; }
+                let (col, dir) = match part.rfind(|c: char| c.is_ascii_whitespace()) {
+                    Some(pos) => {
+                        let d = part[pos + 1..].trim().to_uppercase();
+                        if d == "ASC" || d == "DESC" {
+                            (part[..pos].trim(), Some(d))
+                        } else {
+                            (part, None)
+                        }
+                    }
+                    None => (part, None),
+                };
+                let expanded = self.guard.expand_mapped_fields(col, alias);
+                let prefixed = Guard::auto_prefix_field(&expanded, alias, None);
+                Some(match dir {
+                    Some(d) => format!("{} {}", prefixed, d),
+                    None => prefixed,
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Extracts the table alias from a JOIN string.
     /// "INNER JOIN real_tbl AS alias ON ..." → "alias"
     /// "INNER JOIN tbl ON ..."              → "tbl"
@@ -137,9 +167,7 @@ impl SqlGenerator {
             }
             if let Some(order) = &order_opt {
                 if self.guard.is_safe_order_by(order).is_ok() {
-                    let expanded = self.guard.expand_mapped_fields(order, root_alias);
-                    let prefixed = Guard::auto_prefix_field(&expanded, root_alias, None);
-                    root_sub.push_str(&format!("\n    ORDER BY {}", prefixed));
+                    root_sub.push_str(&format!("\n    ORDER BY {}", self.build_order_by_clause(order, root_alias)));
                 }
             }
             root_sub.push_str(&format!("\n    LIMIT {}", limit_opt.unwrap()));
@@ -213,10 +241,7 @@ impl SqlGenerator {
                     .or_else(|| self.guard.get_default_order(root_alias));
                 if let Some(order) = effective_order {
                     if self.guard.is_safe_order_by(order).is_ok() {
-                        let expanded = self.guard.expand_mapped_fields(order, root_alias);
-                        let prefixed_order = Guard::auto_prefix_field(&expanded, root_alias, None);
-                        base_sql.push_str("\nORDER BY ");
-                        base_sql.push_str(&prefixed_order);
+                        base_sql.push_str(&format!("\nORDER BY {}", self.build_order_by_clause(order, root_alias)));
                     }
                 }
                 if let Some(limit) = source.limit {

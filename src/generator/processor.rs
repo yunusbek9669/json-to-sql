@@ -88,12 +88,16 @@ impl SqlGenerator {
         let mut local_aliases = std::collections::HashMap::new();
         let mut processed_children = std::collections::HashMap::new();
 
+        // Pre-compute has_star before PASS 1 (needed for macro child skip optimization)
+        let has_star = node.fields.values().any(|v| v == "*");
+        let is_strict_mode = !has_star && !node.fields.is_empty();
+
         // --- PRIORITY JOIN RESOLUTION ---
         let mut join_resolutions: std::collections::HashMap<String, (Option<String>, u8)> = std::collections::HashMap::new();
         for child in &node.children {
             if let (Some(src), false) = (&child.source, child.is_list) {
-                let priority = if !src.from_macro && src.join_type.is_some() { 1 } 
-                              else if src.from_macro && src.join_type.is_some() { 2 } 
+                let priority = if !src.from_macro && src.join_type.is_some() { 1 }
+                              else if src.from_macro && src.join_type.is_some() { 2 }
                               else { 3 };
                 let entry = join_resolutions.entry(src.table_name.clone()).or_insert((src.join_type.clone(), priority));
                 if priority < entry.1 { *entry = (src.join_type.clone(), priority); }
@@ -102,6 +106,17 @@ impl SqlGenerator {
 
         // --- PASS 1: Child Processing ---
         for child in &node.children {
+            // In strict mode, skip macro children not referenced in @fields.
+            // This prevents unnecessary JOINs and avoids WHERE conditions from LEFT JOIN
+            // tables that would incorrectly filter out parent rows.
+            if is_strict_mode && child.from_macro {
+                let child_referenced = node.fields.contains_key(&child.name)
+                    || node.fields.values().any(|v| v == &child.name);
+                if !child_referenced {
+                    continue;
+                }
+            }
+
             let mut nc = child.clone();
             if let Some(src) = &mut nc.source {
                 if let Some((best_jt, _)) = join_resolutions.get(&src.table_name) {
@@ -136,7 +151,6 @@ impl SqlGenerator {
         }
         
         let local_aliases_opt = if local_aliases.is_empty() { None } else { Some(&local_aliases) };
-        let has_star = node.fields.values().any(|v| v == "*");
         let mut json_args = Vec::new();
         
         for (field_key, field_sql) in &node.fields {
@@ -374,9 +388,7 @@ impl SqlGenerator {
             .or_else(|| self.guard.get_default_order(child_alias));
         if let Some(order) = effective_order {
             if self.guard.is_safe_order_by(order).is_ok() {
-                let expanded = self.guard.expand_mapped_fields(order, child_alias);
-                let prefixed = Guard::auto_prefix_field(&expanded, child_alias, None);
-                inner_sql.push_str(&format!("\n    ORDER BY {}", prefixed));
+                inner_sql.push_str(&format!("\n    ORDER BY {}", self.build_order_by_clause(order, child_alias)));
             }
         }
         if let Some(limit) = source.limit { inner_sql.push_str(&format!("\n    LIMIT {}", limit)); }

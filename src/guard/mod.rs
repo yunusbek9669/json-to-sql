@@ -189,7 +189,7 @@ fn parse_default_order_param(filter_str: &str) -> Option<String> {
                 let val = rest.trim();
                 // Allow only word chars, dots, and optional trailing ASC/DESC
                 if !val.is_empty()
-                    && val.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ' ')
+                    && val.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ' ' || c == ',')
                 {
                     return Some(val.to_string());
                 }

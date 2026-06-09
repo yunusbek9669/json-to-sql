@@ -1169,3 +1169,48 @@ fn test_null_operators() {
 
     println!("NULL operators testlari o'tdi ✓");
 }
+
+#[test]
+fn test_array_fields_with_macro() {
+    use json_to_sql::parser;
+    use json_to_sql::generator;
+    use indexmap::IndexMap;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    let json_input = r#"{"@data":{"@source":"employeeDataCollector[id: 37566]","@fields":["jshshir"]}}"#;
+    
+    let whitelist_json: Value = json!({
+        "employee[status: 1]": {"id":"id","jshshir":"jshshir","lastNameUz":"last_name"},
+        "employee_department_military_degree:employeeCurrentDegree[status: 1]": {"id":"id","employeeId":"employee_id","degreeGivenTime":"degree_given_time"}
+    });
+    let whitelist: IndexMap<String, Value> = serde_json::from_value(whitelist_json).unwrap();
+    
+    let macros_json: Value = json!({
+        "employeeDataCollector": {
+            "@source": "employee",
+            "@fields": {"id":"id","jshshir":"jshshir","lastNameUz":"last_name"},
+            "0": {"@source":"employeeCurrentDegree","@fields":{"militaryDegreeDate":"degreeGivenTime"}}
+        }
+    });
+    let macros: IndexMap<String, Value> = serde_json::from_value(macros_json).unwrap();
+    
+    let mut rels = HashMap::new();
+    rels.insert("employee->employeeCurrentDegree".to_string(), "LEFT JOIN @table ON @1.id = @2.employee_id AND @2.status = 1".to_string());
+    
+    let root = parser::parse_json(json_input, Some(&macros)).expect("Should parse");
+    let generator_inst = generator::SqlGenerator::new(Some(whitelist), Some(rels));
+    let result = generator_inst.generate(root).expect("Should generate SQL");
+    
+    let sql = result.sql.as_ref().unwrap();
+    println!("Generated SQL:\n{}", sql);
+    println!("Params: {:?}", result.params);
+    
+    // Should only have jshshir in SELECT, not child macro fields
+    assert!(sql.contains("'jshshir'"), "Should select jshshir field");
+    // Macro children must NOT cause unnecessary JOINs in strict mode
+    assert!(!sql.contains("employeeCurrentDegree"), "Macro child JOIN must be skipped in strict mode");
+    assert!(!sql.contains("employee_department_military_degree"), "Macro child real table must not appear");
+    // No spurious WHERE conditions from LEFT JOIN tables
+    assert!(!sql.contains(":p3"), "No extra params from skipped macro children");
+}
