@@ -2,6 +2,10 @@ use super::{Guard, WhitelistRule};
 
 impl Guard {
     pub fn expand_mapped_fields(&self, field_sql: &str, context: &str) -> String {
+        // Trusted raw expression — strip the sentinel prefix and return the SQL as-is.
+        if let Some(raw) = field_sql.strip_prefix("__raw__:") {
+            return raw.to_string();
+        }
         let wl = match &self.whitelist {
             Some(w) => w,
             None => return field_sql.to_string(),

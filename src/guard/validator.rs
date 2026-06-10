@@ -49,6 +49,11 @@ impl Guard {
     }
 
     pub fn validate_field(&self, context: &str, field: &str, local_aliases: Option<&std::collections::HashMap<String, String>>) -> Result<(), String> {
+        // Trusted raw expression from backend @fields {"expression": "..."} notation.
+        // Only check global threats; skip all whitelist and format validation.
+        if let Some(raw_expr) = field.strip_prefix("__raw__:") {
+            return Self::check_global_threats(raw_expr);
+        }
         Self::check_global_threats(field)?;
         let field_upper = field.trim().to_uppercase();
 

@@ -11,6 +11,27 @@ fn escape_sql_key(key: &str) -> String {
     key.replace('\'', "''")
 }
 
+/// Scans a raw SQL expression for `alias.column` references and collects the
+/// `alias` part of each. Used to discover which sibling tables a `__raw__:`
+/// expression depends on, so those tables get JOINed even when they produce no
+/// selected output. Numeric prefixes (e.g. `1.00`) are ignored.
+fn collect_table_refs(expr: &str, out: &mut std::collections::HashSet<String>) {
+    let mut word = String::new();
+    for c in expr.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            if c == '.'
+                && !word.is_empty()
+                && word.chars().next().map_or(false, |f| f.is_alphabetic() || f == '_')
+            {
+                out.insert(word.clone());
+            }
+            word.clear();
+        }
+    }
+}
+
 impl SqlGenerator {
     pub(crate) fn process_node(&mut self, node: &QueryNode, context: Option<(&str, &str)>) -> Result<Vec<String>, String> {
         let (current_alias, current_real) = if let Some(source) = &node.source {
@@ -125,7 +146,28 @@ impl SqlGenerator {
             }
         }
 
+        // Collect table aliases referenced as `alias.column` inside selected raw
+        // (`__raw__:`) expressions of flattened macro children. Such sibling tables
+        // must be JOINed even when they contribute no selected output of their own.
+        let mut raw_referenced_aliases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if is_strict_mode {
+            for child in &node.children {
+                if !child.from_macro || !child.flatten { continue; }
+                let referenced = node.fields.values().any(|v| child.fields.contains_key(v.as_str()));
+                if !referenced { continue; }
+                for fv in child.fields.values() {
+                    if let Some(raw) = fv.strip_prefix("__raw__:") {
+                        collect_table_refs(raw, &mut raw_referenced_aliases);
+                    }
+                }
+            }
+        }
+
         // --- PASS 1: Child Processing ---
+        // Children referenced only by a raw expression (not by @fields) are deferred
+        // until after the main pass, so the sibling tables they hang off of are
+        // already JOINed (their JOIN path may pass through other selected children).
+        let mut deferred_children: Vec<&QueryNode> = Vec::new();
         for child in &node.children {
             // In strict mode, skip macro children not referenced in @fields.
             // This prevents unnecessary JOINs and avoids WHERE conditions from LEFT JOIN
@@ -141,41 +183,23 @@ impl SqlGenerator {
                         || node.fields.values().any(|v| v == &child.name)
                 };
                 if !child_referenced {
+                    // Keep it (deferred) only if a selected raw expression references its
+                    // table — that table must be JOINed for the expression to resolve.
+                    let tbl = child.source.as_ref()
+                        .map(|s| s.table_name.clone())
+                        .unwrap_or_else(|| child.name.clone());
+                    if raw_referenced_aliases.contains(&tbl) {
+                        deferred_children.push(child);
+                    }
                     continue;
                 }
             }
 
-            let mut nc = child.clone();
-            if let Some(src) = &mut nc.source {
-                if let Some((best_jt, _)) = join_resolutions.get(&src.table_name) {
-                    if best_jt.is_some() { src.join_type = best_jt.clone(); }
-                }
-            }
+            self.process_child_node(child, &current_alias, &current_real, &join_resolutions, &mut local_aliases, &mut processed_children)?;
+        }
 
-            if nc.is_list {
-                let list_result = self.build_lateral_subquery(&nc, &current_alias, &current_real)?;
-                let lateral_alias = format!("{}_list", nc.name);
-                self.joins.push(format!("LEFT JOIN LATERAL (\n  {}\n) {} ON true", list_result.sql, lateral_alias));
-                processed_children.insert(nc.name.clone(), (format!("{}.array_data", lateral_alias), false));
-            } else {
-                let child_args = self.process_node(&nc, Some((&current_alias, &current_real)))?;
-                let c_alias = nc.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or(nc.name.as_str());
-                
-                if nc.flatten {
-                    for (f_k, f_v) in &nc.fields {
-                        if f_v != "*" {
-                            let expanded_f_v = self.guard.expand_mapped_fields(f_v, c_alias);
-                            let processed = Guard::auto_prefix_field(&expanded_f_v, c_alias, None);
-                            local_aliases.insert(f_k.clone(), processed);
-                        }
-                    }
-                    processed_children.insert(nc.name.clone(), (child_args.join(", "), true));
-                } else {
-                    let child_sql = format!("json_build_object({})", child_args.join(", "));
-                    local_aliases.insert(nc.name.clone(), child_sql.clone());
-                    processed_children.insert(nc.name.clone(), (child_sql, false));
-                }
-            }
+        for child in deferred_children {
+            self.process_child_node(child, &current_alias, &current_real, &join_resolutions, &mut local_aliases, &mut processed_children)?;
         }
         
         let local_aliases_opt = if local_aliases.is_empty() { None } else { Some(&local_aliases) };
@@ -256,6 +280,52 @@ impl SqlGenerator {
             }
         }
         Ok(json_args)
+    }
+
+    /// Processes a single child node: resolves its JOIN type, then either builds a
+    /// LATERAL subquery (list child) or recurses via `process_node` and folds its
+    /// output into the parent's `local_aliases` / `processed_children`.
+    fn process_child_node(
+        &mut self,
+        child: &QueryNode,
+        current_alias: &str,
+        current_real: &str,
+        join_resolutions: &std::collections::HashMap<String, (Option<String>, u8)>,
+        local_aliases: &mut std::collections::HashMap<String, String>,
+        processed_children: &mut std::collections::HashMap<String, (String, bool)>,
+    ) -> Result<(), String> {
+        let mut nc = child.clone();
+        if let Some(src) = &mut nc.source {
+            if let Some((best_jt, _)) = join_resolutions.get(&src.table_name) {
+                if best_jt.is_some() { src.join_type = best_jt.clone(); }
+            }
+        }
+
+        if nc.is_list {
+            let list_result = self.build_lateral_subquery(&nc, current_alias, current_real)?;
+            let lateral_alias = format!("{}_list", nc.name);
+            self.joins.push(format!("LEFT JOIN LATERAL (\n  {}\n) {} ON true", list_result.sql, lateral_alias));
+            processed_children.insert(nc.name.clone(), (format!("{}.array_data", lateral_alias), false));
+        } else {
+            let child_args = self.process_node(&nc, Some((current_alias, current_real)))?;
+            let c_alias = nc.source.as_ref().map(|s| s.table_name.as_str()).unwrap_or(nc.name.as_str());
+
+            if nc.flatten {
+                for (f_k, f_v) in &nc.fields {
+                    if f_v != "*" {
+                        let expanded_f_v = self.guard.expand_mapped_fields(f_v, c_alias);
+                        let processed = Guard::auto_prefix_field(&expanded_f_v, c_alias, None);
+                        local_aliases.insert(f_k.clone(), processed);
+                    }
+                }
+                processed_children.insert(nc.name.clone(), (child_args.join(", "), true));
+            } else {
+                let child_sql = format!("json_build_object({})", child_args.join(", "));
+                local_aliases.insert(nc.name.clone(), child_sql.clone());
+                processed_children.insert(nc.name.clone(), (child_sql, false));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn build_lateral_subquery(&mut self, node: &QueryNode, parent_alias: &str, parent_real: &str) -> Result<LateralResult, String> {

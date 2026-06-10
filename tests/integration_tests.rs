@@ -1319,3 +1319,218 @@ fn test_array_fields_with_flattened_macro_child() {
     // militaryDegreeType must NOT be JOINed (degreeTypeNameUz not requested)
     assert!(!sql.contains("militaryDegreeType"), "militaryDegreeType JOIN must be skipped");
 }
+
+#[test]
+fn test_raw_expression_in_fields() {
+    // @fields value as {"expression": "CASE WHEN..."} should be treated as trusted raw SQL.
+    // The expression must be prefixed with the child table alias and injected into the SQL.
+    use std::collections::HashMap;
+    use indexmap::IndexMap;
+    use serde_json::json;
+
+    let whitelist_json = json!({
+        "employee": ["id", "lastName"],
+        "employee_position:employeePosition": {
+            "positionId": "position_id",
+            "isDisposal": "is_disposal",
+            "positionNameUz": "position_name_uz"
+        }
+    });
+    let whitelist: IndexMap<String, serde_json::Value> =
+        serde_json::from_value(whitelist_json).unwrap();
+
+    // Child with a raw CASE expression in @fields
+    let macro_def = json!({
+        "@source": "employeePosition",
+        "@flatten": true,
+        "@fields": {
+            "positionId": "positionId",
+            "positionTitle": {
+                "expression": "CASE WHEN is_disposal = TRUE THEN 'Disposed' ELSE position_name_uz END",
+                "params": []
+            }
+        }
+    });
+    let mut macros: IndexMap<String, serde_json::Value> = IndexMap::new();
+    macros.insert("employeePositionMacro".to_string(), macro_def);
+
+    let json_input = r#"{
+        "@data": {
+            "@source": "employee[id: 1]",
+            "@fields": ["id", "positionTitle"]
+        }
+    }"#;
+
+    let mut rels = HashMap::new();
+    rels.insert(
+        "employee->employeePosition".to_string(),
+        "LEFT JOIN @table ON @1.id = @2.employee_id".to_string(),
+    );
+
+    // We directly parse and check, since the macro is embedded in children via JSON
+    // Build the JSON with the macro child inline instead
+    let json_with_child = r#"{
+        "@data": {
+            "@source": "employee[id: 1]",
+            "@fields": ["id", "positionTitle"],
+            "pos": {
+                "@source": "employeePosition",
+                "@flatten": true,
+                "@fields": {
+                    "positionId": "positionId",
+                    "positionTitle": {
+                        "expression": "CASE WHEN is_disposal = TRUE THEN 'Disposed' ELSE position_name_uz END",
+                        "params": []
+                    }
+                }
+            }
+        }
+    }"#;
+
+    let root = parser::parse_json(json_with_child, None).expect("Should parse");
+
+    // Verify the raw expression was stored with __raw__: prefix
+    let pos_child = root.children.iter().find(|c| c.name == "pos").expect("pos child");
+    let title_val = pos_child.fields.get("positionTitle").expect("positionTitle field");
+    assert!(title_val.starts_with("__raw__:"), "Raw expression must have __raw__: prefix");
+
+    let gen_inst = generator::SqlGenerator::new(Some(whitelist), Some(rels));
+    let result = gen_inst.generate(root).expect("Should generate SQL");
+    let sql = result.sql.as_ref().unwrap();
+    println!("Raw expression SQL:\n{}", sql);
+
+    // The CASE expression identifiers must be prefixed with the child table alias
+    assert!(sql.contains("employeePosition.is_disposal"), "is_disposal must be prefixed");
+    assert!(sql.contains("employeePosition.position_name_uz"), "position_name_uz must be prefixed");
+    assert!(sql.contains("'positionTitle'"), "positionTitle key must appear in output");
+}
+
+#[test]
+fn test_macro_computed_alias_selected_by_array() {
+    // The macro root @fields defines a COMPUTED alias `fullName` => CONCAT(...).
+    // The caller selects it via an @fields array. The computed expression must
+    // survive the merge (not be treated as a bare `employee` column).
+    use json_to_sql::parser;
+    use json_to_sql::generator;
+    use indexmap::IndexMap;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    let json_input = r#"{"@data":{"@source":"collector[id: 5]","@fields":["docDate","jshshir","fullName","birthday"]}}"#;
+
+    let whitelist_json: Value = json!({
+        "employee[status: 1]": {
+            "id":"id","jshshir":"jshshir","birthday":"birthday",
+            "lastNameUz":"last_name","firstNameUz":"first_name","parentNameUz":"parent_name"
+        }
+    });
+    let whitelist: IndexMap<String, Value> = serde_json::from_value(whitelist_json).unwrap();
+
+    let macros_json: Value = json!({
+        "collector": {
+            "@source": "employee",
+            "@fields": {
+                "jshshir": "jshshir",
+                "fullName": "CONCAT(lastNameUz, ' ', firstNameUz, ' ', parentNameUz)",
+                "birthday": "TO_CHAR(TO_TIMESTAMP(birthday), 'DD.MM.YYYY')",
+                "docDate": "jshshir"
+            }
+        }
+    });
+    let macros: IndexMap<String, Value> = serde_json::from_value(macros_json).unwrap();
+
+    let root = parser::parse_json(json_input, Some(&macros)).expect("Should parse");
+    let gen_inst = generator::SqlGenerator::new(Some(whitelist), None);
+    let result = gen_inst.generate(root).expect("Should generate SQL");
+    let sql = result.sql.as_ref().unwrap();
+    println!("Computed-alias SQL:\n{}", sql);
+
+    // fullName must emit the CONCAT expression with virtual names mapped to real columns
+    assert!(sql.contains("CONCAT(employee.last_name"), "fullName CONCAT must be expanded");
+    assert!(sql.contains("'fullName'"), "fullName output key required");
+    // birthday must emit the TO_CHAR expression, not a bare column
+    assert!(sql.contains("TO_CHAR(TO_TIMESTAMP(employee.birthday)"), "birthday expression required");
+    // jshshir stays a simple mapped column
+    assert!(sql.contains("'jshshir', employee.jshshir"), "jshshir simple column required");
+    // docDate is an alias NOT in the whitelist; the macro maps it to column jshshir
+    assert!(sql.contains("'docDate', employee.jshshir"), "docDate must map to jshshir via macro");
+}
+
+#[test]
+fn test_raw_expression_references_unselected_sibling_table() {
+    // A flattened macro child's raw expression references a sibling lookup table
+    // (`reductionType.name_uz`). That lookup table is itself an unselected flattened
+    // macro child with NO @fields — in strict mode it would normally be skipped.
+    // The engine must keep it (deferred) and JOIN it so the expression resolves.
+    use std::collections::HashMap;
+    use indexmap::IndexMap;
+    use serde_json::json;
+
+    let whitelist_json = json!({
+        "employee[status: 1]": ["id", "jshshir"],
+        "employee_work:work[status: 1]": {
+            "id": "id",
+            "employeeId": "employee_id",
+            "reductionTypeId": "reduction_type_id",
+            "isReduction": "is_reduction",
+            "positionNameUz": "position_name_uz"
+        },
+        "reduction_type:reductionType[status: 1]": {
+            "id": "id",
+            "nameUz": "name_uz"
+        }
+    });
+    let whitelist: IndexMap<String, serde_json::Value> =
+        serde_json::from_value(whitelist_json).unwrap();
+
+    // Macro: employee with two flattened children —
+    //   "0": work, selected via `fullPos` raw expr (references reductionType.name_uz)
+    //   "1": reductionType, NO @fields (only joined because the expr references it)
+    let macro_def = json!({
+        "@source": "employee",
+        "@fields": { "id": "id", "jshshir": "jshshir" },
+        "0": {
+            "@source": "work",
+            "@flatten": true,
+            "@fields": {
+                "fullPos": {
+                    "expression": "CASE WHEN is_reduction = TRUE AND reductionType.id IS NOT NULL THEN CONCAT(position_name_uz, ' (', reductionType.name_uz, ')') ELSE position_name_uz END",
+                    "params": []
+                }
+            }
+        },
+        "1": {
+            "@source": "reductionType",
+            "@flatten": true
+        }
+    });
+    let mut macros: IndexMap<String, serde_json::Value> = IndexMap::new();
+    macros.insert("collector".to_string(), macro_def);
+
+    let json_input = r#"{
+        "@data": {
+            "@source": "collector[id: 5]",
+            "@fields": ["jshshir", "fullPos"]
+        }
+    }"#;
+
+    let mut rels = HashMap::new();
+    rels.insert("employee->work".to_string(),
+        "LEFT JOIN @table ON @1.id = @2.employee_id".to_string());
+    rels.insert("work->reductionType".to_string(),
+        "LEFT JOIN @table ON @1.reduction_type_id = @2.id".to_string());
+
+    let root = parser::parse_json(json_input, Some(&macros)).expect("Should parse");
+    let gen_inst = generator::SqlGenerator::new(Some(whitelist), Some(rels));
+    let result = gen_inst.generate(root).expect("Should generate SQL");
+    let sql = result.sql.as_ref().unwrap();
+    println!("Sibling-ref SQL:\n{}", sql);
+
+    // The unselected lookup table must still be JOINed so the expression resolves.
+    assert!(sql.contains("AS reductionType"), "reductionType must be JOINed");
+    assert!(sql.contains("AS work"), "work must be JOINed");
+    // The expression's sibling reference stays as-is (not re-prefixed with `work.`)
+    assert!(sql.contains("reductionType.name_uz"), "sibling ref must be preserved");
+    // Bare identifiers from the expression get prefixed with the child alias `work`
+    assert!(sql.contains("work.is_reduction"), "bare ident prefixed with child alias");
+}

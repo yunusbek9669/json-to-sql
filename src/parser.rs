@@ -162,6 +162,23 @@ fn merge_json_objects(base: &mut serde_json::Map<String, Value>, override_map: &
                 merge_json_objects(&mut base_obj, override_obj);
                 base.insert(k.clone(), Value::Object(base_obj));
             }
+            // The macro defines @fields as an object of (alias => expression/column) and
+            // the caller supplies @fields as a selection list. Keep only the selected keys,
+            // mapping each one through the macro's definition (so "fullName": "CONCAT(...)"
+            // and "docDate": "jshshir" both resolve to what the macro says). Keys not in
+            // the macro object fall back to key=>key (resolved as a column or child).
+            (Some(Value::Object(base_obj)), Value::Array(arr)) if k == "@fields" => {
+                let mut result = serde_json::Map::new();
+                for item in arr {
+                    if let Value::String(s) = item {
+                        match base_obj.get(s) {
+                            Some(val) => { result.insert(s.clone(), val.clone()); }
+                            None      => { result.insert(s.clone(), Value::String(s.clone())); }
+                        }
+                    }
+                }
+                base.insert(k.clone(), Value::Object(result));
+            }
             (_, _) => {
                 base.insert(k.clone(), v.clone());
             }
@@ -261,7 +278,30 @@ fn parse_query_node(name: &str, map: &serde_json::Map<String, Value>, macros: &I
             "@mode" => { if let Value::String(s) = v { node.mode = Some(s.to_lowercase()); } }
             "@fields" => {
                 if let Value::Object(fm) = v {
-                    for (fk, fv) in fm { if let Value::String(fvs) = fv { node.fields.insert(fk.clone(), fvs.clone()); } }
+                    for (fk, fv) in fm {
+                        match fv {
+                            Value::String(fvs) => { node.fields.insert(fk.clone(), fvs.clone()); }
+                            Value::Object(obj) => {
+                                match obj.get("expression") {
+                                    Some(Value::String(expr)) => {
+                                        node.fields.insert(fk.clone(), format!("__raw__:{}", expr));
+                                    }
+                                    _ => {
+                                        return Err(format!(
+                                            "@fields '{}': object value must contain a string \"expression\" key",
+                                            fk
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "@fields '{}': value must be a string or an object with an \"expression\" key",
+                                    fk
+                                ));
+                            }
+                        }
+                    }
                 } else if let Value::Array(arr) = v {
                     for item in arr { if let Value::String(s) = item { node.fields.insert(s.clone(), s.clone()); } }
                 }

@@ -18,7 +18,17 @@ impl WhitelistRule {
     pub fn is_allowed(&self, field: &str) -> bool {
         match self {
             Self::Allowed(set) => set.contains("*") || set.contains(field),
-            Self::Mapping(map) => map.contains_key("*") || map.contains_key(field),
+            // Accept a virtual key (e.g. "lastNameUz") OR a real column that the mapping
+            // already exposes as a bare value (e.g. "last_name"). Macro @fields may map an
+            // alias straight to a real column name; that column is already whitelisted via
+            // the mapping, so referencing it by its real name is safe. Expression-valued
+            // mappings (e.g. "CONCAT(...)") never equal a single identifier, so their inner
+            // columns are NOT incidentally exposed.
+            Self::Mapping(map) => {
+                map.contains_key("*")
+                    || map.contains_key(field)
+                    || map.values().any(|v| v == field)
+            }
         }
     }
     
