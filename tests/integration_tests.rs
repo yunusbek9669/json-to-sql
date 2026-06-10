@@ -178,6 +178,59 @@ fn test_auto_path_resolution() {
 }
 
 #[test]
+fn test_left_join_filter_in_on_clause() {
+    // When a LEFT JOINed child has source filters, those filters must go in the
+    // JOIN ON clause — NOT in WHERE — so that parent rows with no matching child
+    // still appear (with NULL child columns) instead of being silently excluded.
+    let json_input = r#"{
+        "@data": {
+            "@source": "employee[id: 1]",
+            "@fields": {
+                "id": "id",
+                "name": "name",
+                "quarterName": "quarterName",
+                "quarterSector": "sectorCode"
+            },
+            "workQuarter": {
+                "@source": "employeeWorkQuarter[isCurrent: true]",
+                "@flatten": true,
+                "@fields": {
+                    "quarterName": "quarterName",
+                    "sectorCode": "sectorCode"
+                }
+            }
+        }
+    }"#;
+
+    let mut wl = indexmap::IndexMap::new();
+    wl.insert("employee".to_string(), json!(["id", "name"]));
+    wl.insert("employee_work:employeeWork".to_string(), json!(["id", "employee_id"]));
+    wl.insert("employee_work_quarter:employeeWorkQuarter".to_string(), json!(["id", "employee_work_id", "isCurrent", "quarterName", "sectorCode"]));
+
+    let mut rels = std::collections::HashMap::new();
+    rels.insert("employee->employeeWork".to_string(), "@join @table ON @1.id = @2.employee_id".to_string());
+    rels.insert("employeeWork->employeeWorkQuarter".to_string(), "@join @table ON @1.id = @2.employee_work_id".to_string());
+
+    let root = parser::parse_json(json_input, None).expect("Should parse");
+    let gen_inst = generator::SqlGenerator::new(Some(wl), Some(rels));
+    let result = gen_inst.generate(root).expect("Should generate SQL");
+
+    let sql_str = result.sql.as_ref().unwrap();
+    println!("LEFT JOIN filter SQL:\n{}", sql_str);
+
+    // The join itself must remain LEFT JOIN (not INNER)
+    assert!(sql_str.contains("LEFT JOIN employee_work_quarter AS employeeWorkQuarter"), "Must stay LEFT JOIN");
+    // Filter condition must be in the ON clause (before WHERE), not in WHERE
+    let filter_pos = sql_str.find("employeeWorkQuarter.isCurrent")
+        .expect("isCurrent filter must appear in SQL");
+    let where_pos = sql_str.find("\n  WHERE").or_else(|| sql_str.find("\nWHERE")).unwrap_or(usize::MAX);
+    assert!(
+        filter_pos < where_pos,
+        "isCurrent filter must be in JOIN ON clause, not WHERE. SQL:\n{}", sql_str
+    );
+}
+
+#[test]
 fn test_info_endpoint() {
     let json_input = "{\"@info\": [\"@tables[*]\", \"@relations\"]}\0".as_ptr() as *const c_char;
     let whitelist_input = "{\"employee:emp\": {\"unique\": \"id\", \"full_name\": \"CONCAT(name)\"}, \"org\": [\"*\"]}\0".as_ptr() as *const c_char;
@@ -1213,4 +1266,56 @@ fn test_array_fields_with_macro() {
     assert!(!sql.contains("employee_department_military_degree"), "Macro child real table must not appear");
     // No spurious WHERE conditions from LEFT JOIN tables
     assert!(!sql.contains(":p3"), "No extra params from skipped macro children");
+}
+
+#[test]
+fn test_array_fields_with_flattened_macro_child() {
+    use json_to_sql::parser;
+    use json_to_sql::generator;
+    use indexmap::IndexMap;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    // militaryDegreeDate is defined in flattened child "0" of the macro
+    let json_input = r#"{"@data":{"@source":"employeeDataCollector[id: 37566]","@fields":["jshshir","lastNameUz","militaryDegreeDate"]}}"#;
+
+    let whitelist_json: Value = json!({
+        "employee[status: 1]": {"id":"id","jshshir":"jshshir","lastNameUz":"last_name","firstNameUz":"first_name"},
+        "employee_department_military_degree:employeeCurrentDegree[status: 1]": {
+            "id":"id","employeeId":"employee_id","degreeGivenTime":"degree_given_time"
+        },
+        "manuals_military_degree_type:militaryDegreeType[status: 1]": {"id":"id","nameUz":"name_uz","nameRu":"name_ru"}
+    });
+    let whitelist: IndexMap<String, Value> = serde_json::from_value(whitelist_json).unwrap();
+
+    let macros_json: Value = json!({
+        "employeeDataCollector": {
+            "@source": "employee",
+            "@fields": {"id":"id","jshshir":"jshshir","lastNameUz":"last_name","firstNameUz":"first_name"},
+            "0": {"@source":"employeeCurrentDegree","@flatten":true,"@fields":{"militaryDegreeDate":"TO_CHAR(TO_TIMESTAMP(degreeGivenTime), 'DD.MM.YYYY')"}},
+            "1": {"@source":"militaryDegreeType","@flatten":true,"@fields":{"degreeTypeNameUz":"nameUz","degreeTypeNameRu":"nameRu"}}
+        }
+    });
+    let macros: IndexMap<String, Value> = serde_json::from_value(macros_json).unwrap();
+
+    let mut rels = HashMap::new();
+    rels.insert("employee->employeeCurrentDegree".to_string(), "LEFT JOIN @table ON @1.id = @2.employee_id AND @2.status = 1 AND @2.current_degree = true".to_string());
+    rels.insert("employeeCurrentDegree->militaryDegreeType".to_string(), "LEFT JOIN @table ON @2.id = @1.military_degree_type_id".to_string());
+
+    let root = parser::parse_json(json_input, Some(&macros)).expect("Should parse");
+    let generator_inst = generator::SqlGenerator::new(Some(whitelist), Some(rels));
+    let result = generator_inst.generate(root).expect("Should generate SQL");
+
+    let sql = result.sql.as_ref().unwrap();
+    println!("Generated SQL:\n{}", sql);
+    println!("Params: {:?}", result.params);
+
+    // Must SELECT jshshir, lastNameUz, and militaryDegreeDate
+    assert!(sql.contains("'jshshir'"), "jshshir field required");
+    assert!(sql.contains("'lastNameUz'"), "lastNameUz field required");
+    assert!(sql.contains("'militaryDegreeDate'"), "militaryDegreeDate field required");
+    // employeeCurrentDegree must be JOINed (militaryDegreeDate needs it)
+    assert!(sql.contains("employeeCurrentDegree"), "employeeCurrentDegree JOIN required");
+    // militaryDegreeType must NOT be JOINed (degreeTypeNameUz not requested)
+    assert!(!sql.contains("militaryDegreeType"), "militaryDegreeType JOIN must be skipped");
 }

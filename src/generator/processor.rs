@@ -65,13 +65,24 @@ impl SqlGenerator {
                 }
             }
             if (context.is_none() || !node.is_list) && !skip_join {
+                // For outer-join children (LEFT/RIGHT/FULL), source filters must go in the
+                // JOIN ON clause — not WHERE — so that rows with no matching child still
+                // appear (with NULL child columns) instead of being silently excluded.
+                let append_to_on = context.is_some() && {
+                    self.joins.last()
+                        .map(|j| {
+                            let u = j.trim().to_uppercase();
+                            u.starts_with("LEFT JOIN") || u.starts_with("RIGHT JOIN") || u.starts_with("FULL JOIN")
+                        })
+                        .unwrap_or(false)
+                };
+
+                let mut conditions: Vec<String> = Vec::new();
                 for filter in &source.filters {
-                    let condition = self.build_condition(&current_alias, filter, Some(&node.fields))?;
-                    self.wheres.push(condition);
+                    conditions.push(self.build_condition(&current_alias, filter, Some(&node.fields))?);
                 }
                 for filter in self.guard.get_default_filters(&current_alias).to_vec() {
-                    let condition = self.build_trusted_condition(&current_alias, &filter)?;
-                    self.wheres.push(condition);
+                    conditions.push(self.build_trusted_condition(&current_alias, &filter)?);
                 }
                 for or_group in &source.or_groups {
                     let mut or_parts = Vec::new();
@@ -79,8 +90,18 @@ impl SqlGenerator {
                         or_parts.push(self.build_condition(&current_alias, filter, Some(&node.fields))?);
                     }
                     if !or_parts.is_empty() {
-                        self.wheres.push(format!("({})", or_parts.join(" OR ")));
+                        conditions.push(format!("({})", or_parts.join(" OR ")));
                     }
+                }
+
+                if append_to_on {
+                    if let Some(last_join) = self.joins.last_mut() {
+                        for cond in conditions {
+                            last_join.push_str(&format!(" AND {}", cond));
+                        }
+                    }
+                } else {
+                    self.wheres.extend(conditions);
                 }
             }
         }
@@ -110,8 +131,15 @@ impl SqlGenerator {
             // This prevents unnecessary JOINs and avoids WHERE conditions from LEFT JOIN
             // tables that would incorrectly filter out parent rows.
             if is_strict_mode && child.from_macro {
-                let child_referenced = node.fields.contains_key(&child.name)
-                    || node.fields.values().any(|v| v == &child.name);
+                let child_referenced = if child.flatten {
+                    // Flattened children merge their field keys into parent's local_aliases.
+                    // Must process if any parent @fields value matches one of the child's field keys.
+                    node.fields.values().any(|v| child.fields.contains_key(v.as_str()))
+                } else {
+                    // Non-flattened children are referenced by child name (key or value in @fields).
+                    node.fields.contains_key(&child.name)
+                        || node.fields.values().any(|v| v == &child.name)
+                };
                 if !child_referenced {
                     continue;
                 }
